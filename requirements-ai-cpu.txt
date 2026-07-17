@@ -1,0 +1,19 @@
+# CPU AI / MIDI stack for BT Analyzer.
+# Install with:  pip install -r requirements-ai-cpu.txt
+# Lazily imported, so the app runs without these until you use the matching node.
+# MIDI to Audio additionally needs a system FluidSynth install (pretty_midi.fluidsynth).
+#
+# OMNIZART NATIVE DEPS (Windows / Python 3.11): omnizart pulls `madmom` and `vamp`, whose old
+# setup.py scripts don't declare their build deps and don't compile cleanly. Before running this
+# file, install them once (needs MSVC build tools):
+#   pip install "numpy<2" cython
+#   pip install --no-build-isolation "git+https://github.com/CPJKU/madmom.git"   # 0.16.1 sdist won't build on 3.11
+#   $env:CL="/Dssize_t=__int64"; pip install --no-build-isolation "vamp==1.1.0"  # defines ssize_t for MSVC
+# Then `pip install -r requirements-ai-cpu.txt` (madmom/vamp will already be satisfied).
+
+torch==2.12.0                  # CPU build (default PyPI wheel)
+audio-separator[cpu]==0.30.2   # BS-RoFormer separation on CPU (onnxruntime)
+imageio-ffmpeg==0.5.1          # bundled ffmpeg binary required by audio-separator
+demucs==4.0.1                  # Demucs v6 (htdemucs_6s) source separation
+omnizart==0.6.0                # Omnizart Vocal note transcription (run `omnizart download-checkpoints` once)
+pretty_midi==0.2.11            # MIDI to Audio / MIDI Export

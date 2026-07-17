@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.build/
+*.whl
+
+# Test, type-check, lint, and coverage output
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.tox/
+.nox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# BT Analyzer runtime artifacts
+# Per-user settings written by the Settings window
+user_settings.json
+# Regenerable on-disk render cache (core/disk_cache.py)
+.cache/
+# Per-session application and GUI action text logs
+logs/
+*.log
+
+# Local audio fixtures and downloaded/exported model intermediates
+samples/*
+!samples/README.md
+*.pt
+*.pth
+*.ckpt
+*.onnx.data
+
+# IDE / OS
+.vscode/
+.idea/
+.claude/
+*.code-workspace
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Windows crash and temporary files
+*.dmp
+*.tmp
+*.temp

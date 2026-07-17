@@ -1,0 +1,19 @@
+{
+  "name": "Basic Pitch ICASSP 2022",
+  "version": "basic-pitch-0.4.0",
+  "file": "nmp.onnx",
+  "sha256": "2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec",
+  "license": "Apache-2.0",
+  "source": "https://github.com/spotify/basic-pitch",
+  "sample_rate": 22050,
+  "input": {
+    "name": "serving_default_input_2:0",
+    "shape": ["batch", 43844, 1],
+    "dtype": "float32"
+  },
+  "outputs": [
+    "StatefulPartitionedCall:1",
+    "StatefulPartitionedCall:2",
+    "StatefulPartitionedCall:0"
+  ]
+}
