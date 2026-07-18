@@ -1,5 +1,7 @@
 # BT Analyzer
 
+<img src="docs\bittersweet.mov.gif">
+
 BT Analyzer is a local, offline practice and song-analysis workspace for musicians. It currently includes several guitar-specific analysis plugins, making it especially useful for guitarists.
 
 In theory, it can extract notes played by different instruments, display them directly on a guitar fretboard, and even estimate playable fingerings.
