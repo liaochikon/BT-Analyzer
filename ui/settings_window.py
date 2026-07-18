@@ -57,7 +57,7 @@ def ui_create_settings_window():
             callback=_on_log_level_changed,
         )
 
-        # AI inference device (takes effect on the next bake), with a probe button beside it.
+        # Demucs / BS-RoFormer device (takes effect on the next bake), with an ONNX probe.
         with dpg.group(horizontal=True):
             dpg.add_combo(
                 ["auto", "cuda", "cpu"],

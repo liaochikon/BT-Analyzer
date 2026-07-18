@@ -3,30 +3,38 @@
 import numpy as np
 
 
-def test_basic_pitch_processor_materializes_sorted_notes(monkeypatch):
+def test_basic_pitch_processor_uses_library_and_materializes_sorted_notes(monkeypatch):
     from core.datatypes import NOTE_DTYPE
+    from nodes.basic_pitch_node import processor as processor_module
     from nodes.basic_pitch_node.processor import BasicPitchParameters, BasicPitchProcessor
 
     observed = {}
-    model_output = {
-        "note": np.zeros((2, 88), dtype=np.float32),
-        "onset": np.zeros((2, 88), dtype=np.float32),
-        "contour": np.zeros((2, 264), dtype=np.float32),
-    }
 
-    def fake_inference(audio, *, sample_rate, session):
-        observed.update(audio=audio, sample_rate=sample_rate, session=session)
-        return model_output
+    class FakeModel:
+        def __init__(self, path):
+            observed["model_path"] = path
 
-    def fake_decode(received, **parameters):
-        observed.update(output=received, parameters=parameters)
-        return [
-            (1.0, 1.5, 64, 0.5),
-            (0.2, 0.7, 60, 1.0),
+    def fake_predict(audio_path, model, **parameters):
+        import soundfile as sf
+
+        audio, sample_rate = sf.read(audio_path, always_2d=True)
+        observed.update(
+            audio=audio,
+            sample_rate=sample_rate,
+            model=model,
+            parameters=parameters,
+        )
+        return {}, object(), [
+            (1.0, 1.5, 64, 0.5, None),
+            (0.2, 0.7, 60, 1.0, [1, 2]),
         ]
 
-    monkeypatch.setattr("nodes.basic_pitch_node.processor.run_inference", fake_inference)
-    monkeypatch.setattr("nodes.basic_pitch_node.processor.decode_notes", fake_decode)
+    monkeypatch.setattr(
+        processor_module,
+        "_load_basic_pitch_api",
+        lambda: (FakeModel, fake_predict, "library-model"),
+    )
+    monkeypatch.setattr(BasicPitchProcessor, "_model", None)
 
     progress = []
     parameters = BasicPitchParameters(
@@ -37,9 +45,11 @@ def test_basic_pitch_processor_materializes_sorted_notes(monkeypatch):
         minimum_frequency=None,
         maximum_frequency=4200.0,
     )
-    notes = BasicPitchProcessor().transcribe(
-        np.zeros((1, 256), dtype=np.float32),
-        model="fake-model",
+    processor = BasicPitchProcessor()
+    model = processor.get_model()
+    notes = processor.transcribe(
+        np.zeros((2, 256), dtype=np.float32),
+        model=model,
         parameters=parameters,
         sample_rate=44100,
         progress=progress.append,
@@ -48,8 +58,10 @@ def test_basic_pitch_processor_materializes_sorted_notes(monkeypatch):
     assert notes.dtype == NOTE_DTYPE
     assert notes["pitch"].tolist() == [60, 64]
     assert notes["velocity"].tolist() == [127, 64]
-    assert observed["session"] == "fake-model"
+    assert observed["model_path"] == "library-model"
+    assert observed["model"] is model
     assert observed["sample_rate"] == 44100
-    assert observed["output"] is model_output
+    assert observed["audio"].shape == (256, 2)
     assert observed["parameters"]["maximum_frequency"] == 4200.0
+    assert observed["parameters"]["multiple_pitch_bends"] is False
     assert progress == [0.9]

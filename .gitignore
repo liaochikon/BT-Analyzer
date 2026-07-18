@@ -37,10 +37,15 @@ user_settings.json
 # Per-session application and GUI action text logs
 logs/
 *.log
+# Recurring DearPyGui / GPU layout artifacts written at the repository root
+/True
+/maxwell_hcudnn_*
+/minimum_frequency_secondary_control_node_*
 
 # Local audio fixtures and downloaded/exported model intermediates
 samples/*
 !samples/README.md
+!samples/README.zh-TW.md
 *.pt
 *.pth
 *.ckpt

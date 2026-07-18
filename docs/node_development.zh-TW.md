@@ -1,5 +1,7 @@
 # 新增節點開發指南（BaseNode）
 
+[English](node_development.md)
+
 這份文件說明如何在 BT Analyzer 裡新增一個節點。對象是新進開發者，也適合給 AI 直接參考做 vibe coding。所有範例都指向 `nodes/` 底下**已存在、可運作**的節點，照抄最接近的那個原型再改即可。
 
 > TL;DR：在 `nodes/<your_node>/node.py` 寫一個 `class XxxNode(BaseNode)`，設定能力旗標、覆寫對應的鉤子、註冊輸入/輸出腳位。引擎會自動掃描並註冊它。
@@ -24,13 +26,11 @@ state，使用`GRAPH_STATE`；第三方extensions不應依賴owner internals，�
 
 | 原型 | 用途 | 旗標 | 必須覆寫 | 參考檔案 |
 |---|---|---|---|---|
-| **輕量串流效果** | 即時逐塊轉換音訊（gain、EQ、壓縮…） | `config.processing=STREAMING` | `build_stream_renderer`、`publish_outputs`、`_process_block` | [gain_node/node.py](gain_node/node.py) |
-| **效果 + 詳細控制** | 效果自動加入 Workspace 分頁 | `config.processing=STREAMING`、`config.ui=INSPECTOR` | 上述 + `_draw_inspector` | [eq_node/node.py](eq_node/node.py) |
-| **透明監看（tap）** | 不改音訊，只擷取畫圖（示波器、頻譜） | `config.processing=STREAMING`、`config.realtime`、`config.ui=INSPECTOR_PANEL` | `build_stream_renderer`(passthrough)、`_draw_panel`、`on_gui_frame`、`publish_outputs` | [spectrum_node/node.py](spectrum_node/node.py)、[oscilloscope_node/node.py](oscilloscope_node/node.py) |
-| **重度來源 / 烘焙** | 載入或重運算大資料（讀檔、AI 分離、轉錄） | `config.processing=BAKED` | `bake`、`publish_outputs` | [audio_input_node/node.py](audio_input_node/node.py)、[bs_roformer_node/node.py](bs_roformer_node/node.py) |
-| **匯出 / sink** | 在 heavy compile 統一寫出結果 | `config.processing=BAKED` | `bake`、`publish_outputs` | [audio_export_node/node.py](audio_export_node/node.py)、[midi_export_node/node.py](midi_export_node/node.py) |
-
-> 特例：[normalize_node/node.py](normalize_node/node.py) 是 streamable，但需要先掃完整段求峰值，所以它**自己覆寫** `build_stream_renderer`（不走單輸入 helper）。當你的節點需要「看過全段才能決定怎麼處理」時，照它抄。
+| **輕量串流效果** | 即時逐塊轉換音訊（gain、EQ、壓縮…） | `config.processing=STREAMING` | `build_stream_renderer`、`publish_outputs`、`_process_block` | [gain_node/node.py](../nodes/gain_node/node.py) |
+| **效果 + 詳細控制** | 效果自動加入 Workspace 分頁 | `config.processing=STREAMING`、`config.ui=INSPECTOR` | 上述 + `_draw_inspector` | [eq_node/node.py](../nodes/eq_node/node.py) |
+| **透明監看（tap）** | 不改音訊，只擷取畫圖（示波器、頻譜） | `config.processing=STREAMING`、`config.realtime`、`config.ui=INSPECTOR_PANEL` | `build_stream_renderer`(passthrough)、`_draw_panel`、`on_gui_frame`、`publish_outputs` | [spectrum_node/node.py](../nodes/spectrum_node/node.py)、[oscilloscope_node/node.py](../nodes/oscilloscope_node/node.py) |
+| **重度來源 / 烘焙** | 載入或重運算大資料（讀檔、AI 分離、轉錄） | `config.processing=BAKED` | `bake`、`publish_outputs` | [audio_input_node/node.py](../nodes/audio_input_node/node.py)、[bs_roformer_node/node.py](../nodes/bs_roformer_node/node.py) |
+| **匯出 / sink** | 在 heavy compile 統一寫出結果 | `config.processing=BAKED` | `bake`、`publish_outputs` | [audio_export_node/node.py](../nodes/audio_export_node/node.py)、[midi_export_node/node.py](../nodes/midi_export_node/node.py) |
 
 ---
 
@@ -267,7 +267,7 @@ def publish_outputs(self) -> bool:
 - 重度來源變動時（例如換檔案）呼叫 `mark_structural_heavy_stale(self.node_tag)`，把自己與所有下游 heavy 節點標記為過期。
 - 串流效果類的參數變動則呼叫 `mark_downstream_heavy_stale(self.node_tag)`。
 
-完整範例見 [audio_input_node/node.py](audio_input_node/node.py)。
+完整範例見 [audio_input_node/node.py](../nodes/audio_input_node/node.py)。
 
 ---
 
@@ -323,4 +323,4 @@ def get_param_signature(self) -> str:
 
 ## 最小完整範例
 
-最短的可運作節點是 [gain_node/node.py](gain_node/node.py)（輕量串流效果，約 55 行）。要新增同類效果，從它複製、改 `_process_block` 的 DSP 與參數即可。需要面板繪圖就改參考 [eq_node/node.py](eq_node/node.py)。
+最短的可運作節點是 [gain_node/node.py](../nodes/gain_node/node.py)（輕量串流效果，約 55 行）。要新增同類效果，從它複製、改 `_process_block` 的 DSP 與參數即可。需要面板繪圖就改參考 [eq_node/node.py](../nodes/eq_node/node.py)。

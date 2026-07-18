@@ -1,5 +1,7 @@
 # Runtime Simulation Framework
 
+[繁體中文](README.zh-TW.md)
+
 This package drives semantic user actions through the real callback publisher, bounded bus,
 `GraphOwner`, pipeline state, persistence worker, and DearPyGui projection. It uses a bare DPG
 context and a temporary preset directory, so scenarios are suitable for headless CI and never

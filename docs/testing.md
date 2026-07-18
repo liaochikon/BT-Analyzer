@@ -1,93 +1,88 @@
-# 測試指南
+# Testing Guide
 
-本專案的測試皆可headless執行，不需要開啟viewport或實體音訊裝置。根目錄
-`conftest.py`會先安裝最小的`sounddevice` stub，並為需要DearPyGui的測試建立一個
-不含viewport的共用context。
+[繁體中文](testing.zh-TW.md)
 
-## 快速執行
+All tests can run headlessly without opening a viewport or using a physical audio device. The root `conftest.py` installs a minimal `sounddevice` stub and creates a shared DearPyGui context without a viewport for tests that need it.
 
-請在專案根目錄執行：
+## Quick Start
+
+Run from the repository root:
 
 ```powershell
-conda activate bocchi
+conda activate bt_env
 python -m pytest -q
 ```
 
-`pytest.ini`的`testpaths = tests nodes`會同時收集：
+The `testpaths = tests nodes` setting in `pytest.ini` collects both groups:
 
-- `tests/test_*.py`：core、application、persistence、projection與runtime測試。
-- `nodes/**/test_*.py`：與node plugin放在一起的行為測試。
+- `tests/test_*.py`: core, application, persistence, projection, and runtime tests.
+- `nodes/**/test_*.py`: behavioral tests located beside node plugins.
 
-不要只執行`pytest tests/`作為完整回歸，因為那會漏掉`nodes/`下的測試。建議使用
-`python -m pytest`，確保使用目前conda環境中的Python與pytest。
+Do not use only `pytest tests/` as a full regression run because it omits tests under `nodes/`. Prefer `python -m pytest` so Python and pytest come from the active Conda environment.
 
-## 測試分類
+## Test Categories
 
-collection時，`conftest.py`會為每個測試自動加上一個執行層級marker：
+During collection, `pytest_collection_modifyitems()` in `conftest.py` assigns an execution-level marker to every test:
 
-| Marker | 範圍 | 典型腳本 |
-| --- | --- | --- |
-| `unit` | 單一core primitive、DSP、document、contract或node行為 | `test_bus.py`、`test_dsp.py`、`nodes/**/test_node.py` |
-| `integration` | 跨application、worker、persistence或GUI projection邊界 | `test_graph_owner.py`、`test_persistence_worker.py`、`test_graph_projection.py` |
-| `runtime` | 從semantic user action走完整production command/event路徑 | `test_runtime_simulation.py` |
+| Marker | Scope | Typical files |
+|---|---|---|
+| `unit` | One core primitive, DSP operation, document, contract, or node behavior | `test_bus.py`, `test_dsp.py`, `nodes/**/test_node.py` |
+| `integration` | Crosses application, worker, persistence, or GUI projection boundaries | `test_graph_owner.py`, `test_persistence_worker.py`, `test_graph_projection.py` |
+| `runtime` | Follows a semantic user action through the complete production command/event path | `test_runtime_simulation.py` |
 
-另有兩個可和上述層級疊加的用途marker：
+Two purpose markers may be combined with those execution levels:
 
-| Marker | 用途 |
-| --- | --- |
-| `node` | `nodes/`下與plugin同位置的node測試 |
-| `architecture` | 以AST、imports或surface檢查ownership與dependency規則 |
+| Marker | Purpose |
+|---|---|
+| `node` | A node test located under `nodes/` |
+| `architecture` | AST, import, or surface checks for ownership and dependency rules |
 
-分類規則集中在`conftest.py`的`pytest_collection_modifyitems()`；新增跨邊界測試腳本時，
-應將module stem加入`_INTEGRATION_TEST_MODULES`。runtime入口固定集中於
-`tests/test_runtime_simulation.py`，framework支援程式則放在`tests/runtime_sim/`。
+When adding a cross-boundary test module, add its module stem to `_INTEGRATION_TEST_MODULES`. Runtime entry tests stay in `tests/test_runtime_simulation.py`, while framework support code stays in `tests/runtime_sim/`.
 
-## 分層執行
+## Running Individual Layers
 
 ```powershell
-# 快速unit層，包含node plugin測試
+# Fast unit layer, including node plugin tests
 python -m pytest -m unit -q
 
-# application / persistence / projection整合層
+# Application, persistence, and projection integration layer
 python -m pytest -m integration -q
 
-# semantic runtime scenarios
+# Semantic runtime scenarios
 python -m pytest -m runtime -q
 
-# 所有node plugin測試
+# All node plugin tests
 python -m pytest -m node -q
 
-# ownership與dependency architecture gates
+# Ownership and dependency architecture gates
 python -m pytest -m architecture -q
 ```
 
-marker可使用pytest expression組合：
+Markers support normal pytest expressions:
 
 ```powershell
 python -m pytest -m "integration or runtime" -q
 python -m pytest -m "unit and not node" -q
 ```
 
-也可以縮小到單一檔案或test：
+You can also narrow execution to one file or test:
 
 ```powershell
 python -m pytest tests/test_bus.py -q
 python -m pytest tests/test_runtime_simulation.py::test_compile_gate_rejects_user_mutation_until_completion -q
 ```
 
-需要顯示print或完整traceback時：
+For printed output and complete tracebacks:
 
 ```powershell
 python -m pytest -m runtime -s -vv --tb=long
 ```
 
-## Semantic Runtime框架
+## Semantic Runtime Framework
 
-`tests/runtime_sim/`不是production的替代實作。它組合真實的`ApplicationContext`、
-`core.bus.Bus`、`GraphOwner`、pipeline、`PersistenceWorker`、`GraphApplication`與
-DearPyGui projection，再以暫存preset目錄隔離使用者資料。
+`tests/runtime_sim/` is not a replacement implementation. It composes the real `ApplicationContext`, `core.bus.Bus`, `GraphOwner`, pipeline, `PersistenceWorker`, `GraphApplication`, and DearPyGui projection while isolating user data in a temporary preset directory.
 
-每個action都走和GUI相同的command/event路徑：
+Every action follows the same command/event path as the GUI:
 
 ```text
 Semantic Action
@@ -101,11 +96,9 @@ Semantic Action
   -> assertion + invariant checks
 ```
 
-所有DearPyGui mutation都留在harness所在的GUI測試執行緒；owner command由owner執行緒
-處理。harness會記錄`ACTION`、`OWNER`、`EVENT`、`GUI`、`RESULT`與`ASSERT`，並在每個
-操作後檢查node/pin ownership、connection唯一性、projection一致性與執行緒歸屬。
+All DearPyGui mutations remain on the harness GUI test thread, and owner commands run on the owner thread. The harness records `ACTION`, `OWNER`, `EVENT`, `GUI`, `RESULT`, and `ASSERT`, then checks node and pin ownership, connection uniqueness, projection consistency, and thread ownership after every operation.
 
-### 撰寫情境
+### Writing Scenarios
 
 ```python
 from tests.runtime_sim import (
@@ -128,14 +121,11 @@ def test_signal_chain(runtime_harness):
     )
 ```
 
-scenario使用穩定alias，不直接依賴runtime產生的node ID；pin格式為`alias.port_role`。
-預期command被拒絕時使用`perform_rejected(action, reason=...)`，讓rejection也成為可觀察
-結果，而不是在測試內攔截內部exception。
+Scenarios use stable aliases rather than runtime-generated node IDs. Pin references use `alias.port_role`. When a command should be rejected, call `perform_rejected(action, reason=...)` so rejection remains an observable result instead of catching an internal exception in the test.
 
-### 非同步與race測試
+### Asynchronous And Race Tests
 
-runtime測試禁止用`time.sleep()`等待。completion必須綁定projection event、worker
-result、compile request或condition gate：
+Runtime tests must not wait with `time.sleep()`. Completion must be tied to a projection event, worker result, compile request, or condition gate:
 
 ```python
 pending = runtime.begin(LoadPreset("practice"))
@@ -145,13 +135,11 @@ runtime.release_persistence("load")
 runtime.complete_rejected(pending, reason="REVISION_CONFLICT")
 ```
 
-使用`RuntimeHarness(defer_persistence=True)`可確定性控制load/save worker完成順序；
-compile則使用`wait_for_compile_request()`與`complete_compile()`。這些gate讓CI不依賴機器
-速度，也能穩定重現revision race。
+Use `RuntimeHarness(defer_persistence=True)` to control load/save worker completion deterministically. Compile operations use `wait_for_compile_request()` and `complete_compile()`. These gates make race tests independent of machine speed.
 
-### Scenario與seeded model
+### Scenarios And The Seeded Model
 
-`Scenario`可將action序列序列化成JSON，適合AI agent產生、CI保存與失敗後重播：
+`Scenario` serializes action sequences to JSON for AI generation, CI artifacts, and failure replay:
 
 ```python
 payload = scenario.dumps()
@@ -159,26 +147,21 @@ Scenario.loads(payload).run(runtime_harness)
 trace_json = runtime_harness.trace.dumps()
 ```
 
-`SeededScenarioGenerator(seed)`使用標準庫`random.Random`建立合法DAG操作，並維護獨立的
-nodes、names、parameters、connections與undo/redo history model。每一步都將model與真實
-runtime比較：
+`SeededScenarioGenerator(seed)` uses the standard library `random.Random` and maintains an independent model of nodes, names, parameters, connections, and undo/redo history. Every operation compares that model with the real runtime:
 
 ```python
 SeededScenarioGenerator(19).generate(steps=30).run(runtime_harness)
 ```
 
-失敗訊息包含seed、step、完整Scenario JSON與trace tail，因此可直接重播。固定seed應留在
-CI測試；探索新seed時先在本機執行，找到failure後把最小重現情境固化成具名test。
+Failures include the seed, step, complete Scenario JSON, and trace tail. Keep fixed seeds in CI. When exploration finds a failure, reduce it to a named regression test.
 
-## 擴充原則
+## Extension Rules
 
-1. 純函式或單一class行為放在unit測試；跨owner/worker/projection才列為integration。
-2. node演算法測試放在對應`nodes/<plugin>/test_node.py`，並使用`make_node` fixture。
-3. 使用者可觀察workflow放在runtime層，action必須呼叫production publisher或callback。
-4. 新runtime action需定義最終可觀察的`expected_events`；多階段流程覆寫
-   `await_completion()`，不可sleep或直接修改GraphState。
-5. 測試不得讀寫使用者preset；使用`tmp_path`或RuntimeHarness的暫存persistence目錄。
-6. 修正race或regression時，先加入能失敗的最小測試，再執行對應層級，最後跑完整
-   `python -m pytest -q`。
+1. Put pure functions and single-class behavior in unit tests; use integration tests only when crossing owner, worker, or projection boundaries.
+2. Put node algorithm tests in the matching `nodes/<plugin>/test_node.py` and use the `make_node` fixture.
+3. Put user-observable workflows in the runtime layer; actions must call a production publisher or callback.
+4. New runtime actions must define their final observable `expected_events`. Override `await_completion()` for multi-stage flows instead of sleeping or directly modifying `GraphState`.
+5. Tests must not read or write user presets. Use `tmp_path` or the RuntimeHarness temporary persistence directory.
+6. For a race or regression fix, add the smallest failing test first, run the affected layer, then run the complete `python -m pytest -q` suite.
 
-更細的action、controlled race與trace API範例可參考`tests/runtime_sim/README.md`。
+For detailed actions, controlled races, and trace API examples, see the [Runtime Simulation Framework](../tests/runtime_sim/README.md).

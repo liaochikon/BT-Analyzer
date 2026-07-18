@@ -9,14 +9,6 @@
 #   https://pytorch.org/get-started/locally/  and  https://download.pytorch.org/whl/<tag>/torch/
 # The +cuXXX local-version pins force the CUDA wheels even though PyPI also ships a CPU 2.12.0.
 # MIDI to Audio additionally needs a system FluidSynth install (pretty_midi.fluidsynth).
-#
-# OMNIZART NATIVE DEPS (Windows / Python 3.11): omnizart pulls `madmom` and `vamp`, whose old
-# setup.py scripts don't declare their build deps and don't compile cleanly. Before running this
-# file, install them once (needs MSVC build tools):
-#   pip install "numpy<2" cython
-#   pip install --no-build-isolation "git+https://github.com/CPJKU/madmom.git"   # 0.16.1 sdist won't build on 3.11
-#   $env:CL="/Dssize_t=__int64"; pip install --no-build-isolation "vamp==1.1.0"  # defines ssize_t for MSVC
-# Then `pip install -r requirements-ai-gpu.txt` (madmom/vamp will already be satisfied).
 
 --extra-index-url https://download.pytorch.org/whl/cu126
 
@@ -24,6 +16,8 @@ torch==2.12.0+cu126            # CUDA 12.6 build
 torchaudio==2.11.0+cu126       # matching CUDA build (demucs dependency)
 torchvision==0.27.0+cu126      # matching CUDA build
 onnxruntime-gpu==1.26.0        # ONNX Runtime w/ CUDAExecutionProvider (do NOT also install onnxruntime)
+basic-pitch==0.4.0             # Official Basic Pitch transcription library
+ml-dtypes==0.2.0               # TensorFlow 2.15 compatibility on Python 3.11
 audio-separator[gpu]==0.30.2   # BS-RoFormer separation on GPU
 imageio-ffmpeg==0.5.1          # bundled ffmpeg binary required by audio-separator
 demucs==4.0.1                  # Demucs v6 (htdemucs_6s) source separation

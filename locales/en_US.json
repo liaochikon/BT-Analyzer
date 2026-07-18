@@ -25,7 +25,7 @@
     "settings_window_title": "Settings",
     "settings_language_label": "Language",
     "settings_loglevel_label": "Log Level",
-    "settings_device_label": "AI Device",
+    "settings_device_label": "Demucs / BS-RoFormer Device",
     "settings_detect_device_btn": "Detect",
     "settings_device_cpu_only": "CPU only",
     "settings_device_no_onnxruntime": "ONNX Runtime not found",

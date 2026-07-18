@@ -1,7 +1,6 @@
 import logging
 import dearpygui.dearpygui as dpg
 from core import *
-from core import settings
 from app_logging.logging import append_log
 from nodes.basic_pitch_node.processor import BasicPitchParameters, BasicPitchProcessor
 
@@ -68,19 +67,17 @@ class BasicPitchNode(BaseNode):
         packet = self.input_values.get(self.in_audio)
         if packet is None or packet.data is None:
             append_log(f"[{self.display_name}] Bake failed: no input audio connected (bake the upstream source first).", level="WARNING")
+            self.is_baked = False
             return False
 
         self._report_progress(0.05)
         try:
-            requested_device = str(
-                settings.get("inference_device", INFERENCE_DEVICE)).lower()
-            model = self._processor.get_model(requested_device)
+            model = self._processor.get_model()
         except Exception as e:
             logger.exception("[%s] Failed to load Basic Pitch model", self.display_name)
             append_log(f"[{self.display_name}] Failed to load Basic Pitch model: {e}", level="ERROR")
+            self.is_baked = False
             return False
-        for warning in model.warnings:
-            append_log(f"[{self.display_name}] {warning}", level="WARNING")
 
         self._report_progress(0.15)
         append_log(
@@ -90,14 +87,14 @@ class BasicPitchNode(BaseNode):
         try:
             notes = self._processor.transcribe(
                 packet.data,
-                model=model.session,
+                model=model,
                 sample_rate=GLOBAL_SAMPLE_RATE,
                 progress=self._report_progress,
                 parameters=BasicPitchParameters(
                     melodia_trick=self.melodia_trick,
-                onset_threshold=self.onset_threshold,
-                frame_threshold=self.frame_threshold,
-                minimum_note_length=self.minimum_note_length,
+                    onset_threshold=self.onset_threshold,
+                    frame_threshold=self.frame_threshold,
+                    minimum_note_length=self.minimum_note_length,
                     minimum_frequency=(self.minimum_frequency
                                        if self.minimum_frequency > 0 else None),
                     maximum_frequency=(self.maximum_frequency
