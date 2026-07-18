@@ -1,5 +1,9 @@
 # BT Analyzer
 
+<img src="docs\bittersweet.mov.gif">
+
+[Demo Video](https://youtu.be/L5T09W4_2zg)
+
 BT Analyzer 是給樂手使用的本機離線練歌與歌曲分析工具，目前有針對吉他開發了幾個專用分析插件，所以特別適合吉他手。
 
 理論上來說可以直接抓出不同樂器的音符並直接以吉他指板顯示，外加彈奏手型推算等功能。
