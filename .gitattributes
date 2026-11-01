@@ -1,5 +1,4 @@
 # Normalize source and configuration files across Windows and CI.
-*.py text eol=lf
 *.md text eol=lf
 *.json text eol=lf
 *.yml text eol=lf
@@ -10,3 +9,6 @@
 *.bat text eol=crlf
 *.c text eol=lf
 *.h text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.cmake text eol=lf

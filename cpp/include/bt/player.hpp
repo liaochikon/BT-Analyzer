@@ -1,0 +1,98 @@
+#pragma once
+
+#include "bt/separator.hpp"
+
+#include <array>
+#include <atomic>
+#include <expected>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace bt {
+
+struct PlaybackDevice {
+    std::string id;
+    std::string name;
+};
+
+// Plays the stem mix. The device callback only reads a ring buffer.
+// Seek, speed, and loop positions are on the song timeline (the waveform).
+class Player {
+public:
+    struct Snapshot {
+        bool playing = false;
+        bool ready = false;
+        double position = 0;
+        double length = 0;
+        float speed = 1.f;
+        float master_db = 0.f;
+        bool loop = false;
+        double loop_a = -1;
+        double loop_b = -1;
+        bool counting = false;
+    };
+
+    Player();
+    ~Player();
+
+    Player(const Player&) = delete;
+    Player& operator=(const Player&) = delete;
+
+    void set_song(std::shared_ptr<const Stems> stems);
+    void clear_song();
+    void set_mix(
+        const std::array<float, kStemCount>& gain, const std::array<bool, kStemCount>& mute,
+        const std::array<bool, kStemCount>& solo, const std::array<float, kStemCount>& pan = {});
+
+    void play();
+    void pause();
+    void stop();
+    void count_in(int beats);
+    void seek(double seconds);
+    void set_speed(float speed);
+    void set_master_db(float db);
+    void set_loop_enabled(bool enabled);
+    void set_loop_a(double seconds);
+    void set_loop_b(double seconds);
+    void clear_loop();
+    void set_metronome(
+        bool enabled, float bpm, float click_db, double beat_offset, bool follow_beats = false,
+        std::shared_ptr<const std::vector<double>> beats = {});
+
+    Snapshot snapshot() const;
+    // Synchronous path for tests. Do not call it while the device thread is running.
+    int render(float* interleaved, int frames);
+    std::vector<PlaybackDevice> playback_devices();
+    std::expected<void, std::string> start_device();
+    std::expected<void, std::string> use_device(std::string_view id);
+    const std::string& device_error() const { return device_error_; }
+
+private:
+    bool ensure_context();
+    std::expected<void, std::string> open_playback(const void* device_id);
+    struct Mix;
+
+    void wake();
+    void discard_ring();
+    void install_song();
+    void apply_transport();
+    int read_source(int start, int frames, float* interleaved);
+    int synthesize(float* interleaved, int frames);
+    void arm_click(bool downbeat);
+    void accept_count_in();
+    int render_count_in(float* interleaved, int frames);
+    void render_click(float* interleaved, int frames);
+    void mix_metronome(float* interleaved, int frames, double from, double to);
+    int ring_space() const;
+    void ring_write(const float* interleaved, int frames);
+    int ring_read(float* interleaved, int frames);
+    void thread_main();
+
+    struct State;
+    std::unique_ptr<State> state_;
+    std::string device_error_;
+};
+
+}  // namespace bt

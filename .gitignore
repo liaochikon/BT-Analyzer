@@ -1,60 +1,14 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-.eggs/
-build/
-dist/
-.build/
-*.whl
+# C++ build
+/cpp/build/
 
-# Test, type-check, lint, and coverage output
-.pytest_cache/
-.coverage
-.coverage.*
-coverage.xml
-htmlcov/
-.mypy_cache/
-.ruff_cache/
-.pyre/
-.pytype/
-.tox/
-.nox/
-
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
-.conda/
-
-# BT Analyzer runtime artifacts
-# Per-user settings written by the Settings window
-user_settings.json
-# Regenerable on-disk render cache (core/disk_cache.py)
-.cache/
-# Per-session application and GUI action text logs
-logs/
-*.log
-# Recurring DearPyGui / GPU layout artifacts written at the repository root
-/True
-/maxwell_hcudnn_*
-/minimum_frequency_secondary_control_node_*
-
-# Local audio fixtures and downloaded/exported model intermediates
-samples/*
-!samples/README.md
-!samples/README.zh-TW.md
-*.pt
-*.pth
-*.ckpt
+# Model weights
+/models/
+*.onnx
 *.onnx.data
 
 # IDE / OS
 .vscode/
 .idea/
-.claude/
 *.code-workspace
 *.swp
 *.swo
@@ -67,3 +21,4 @@ Desktop.ini
 *.dmp
 *.tmp
 *.temp
+*.log
