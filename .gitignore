@@ -1,6 +1,14 @@
 # C++ build
 /cpp/build/
 
+# Release zip assembled by build.bat
+/dist/
+
+# Python export environment
+.venv/
+__pycache__/
+.pytest_cache/
+
 # Model weights
 /models/
 *.onnx

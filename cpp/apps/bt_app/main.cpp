@@ -238,6 +238,17 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
+std::wstring application_title() {
+#ifndef BT_VERSION
+#error BT_VERSION is missing
+#endif
+    std::wstring title = L"BT-Analyzer ";
+    for (const char* cursor = BT_VERSION; *cursor != '\0'; ++cursor) {
+        title.push_back(static_cast<unsigned char>(*cursor));
+    }
+    return title;
+}
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show) {
@@ -264,8 +275,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     window_class.hInstance = instance;
     window_class.lpszClassName = L"bt_analyzer";
     RegisterClassExW(&window_class);
+    const std::wstring title = application_title();
     HWND hwnd = CreateWindowExW(
-        WS_EX_ACCEPTFILES, window_class.lpszClassName, L"BT-Analyzer", WS_OVERLAPPEDWINDOW, origin.x, origin.y, window_width,
+        WS_EX_ACCEPTFILES, window_class.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW, origin.x, origin.y, window_width,
         window_height, nullptr, nullptr, instance, nullptr);
 
     const auto exe_dir = executable_directory();
@@ -324,12 +336,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
             &gfx.device, nullptr, &gfx.context);
     }
     if (FAILED(created)) {
-        MessageBoxW(nullptr, L"Direct3D 11 無法啟動", L"BT-Analyzer", MB_ICONERROR);
+        MessageBoxW(nullptr, L"Direct3D 11 無法啟動", title.c_str(), MB_ICONERROR);
         return 1;
     }
     gfx.swap_flags = swap_desc.Flags;
     if (!create_target(gfx)) {
-        MessageBoxW(nullptr, L"Direct3D 11 無法啟動", L"BT-Analyzer", MB_ICONERROR);
+        MessageBoxW(nullptr, L"Direct3D 11 無法啟動", title.c_str(), MB_ICONERROR);
         return 1;
     }
     RECT client{};
@@ -361,7 +373,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     };
     auto session_created = bt::Session::create(std::move(options));
     if (!session_created) {
-        MessageBoxW(nullptr, L"Session 無法啟動", L"BT-Analyzer", MB_ICONERROR);
+        MessageBoxW(nullptr, L"Session 無法啟動", title.c_str(), MB_ICONERROR);
         return 1;
     }
     auto session = std::move(*session_created);

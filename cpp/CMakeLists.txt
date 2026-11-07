@@ -1,6 +1,18 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(bt_stem LANGUAGES C CXX)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" BT_VERSION)
+string(STRIP "${BT_VERSION}" BT_VERSION)
+if(NOT BT_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+  message(FATAL_ERROR "VERSION must be major.minor.patch, got '${BT_VERSION}'")
+endif()
+set(BT_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(BT_VERSION_MINOR "${CMAKE_MATCH_2}")
+set(BT_VERSION_PATCH "${CMAKE_MATCH_3}")
+
+project(bt_stem VERSION ${BT_VERSION} LANGUAGES C CXX)
+
+# Release packaging leaves these off. build.bat Debug turns them on.
+option(BT_DEV_TOOLS "Build bt-separate and the test runner" ON)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,7 +29,6 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(WITH_OPENMP OFF CACHE BOOL "" FORCE)
 set(WITH_LSR_BINDINGS OFF CACHE BOOL "" FORCE)
 
@@ -30,7 +41,13 @@ FetchContent_Declare(
   Catch2
   URL https://github.com/catchorg/Catch2/archive/refs/tags/v3.8.1.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_MakeAvailable(soxr Catch2)
+# soxr is LGPL-2.1. A shared library can be replaced without relinking bt-app.
+set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(soxr)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+if(BT_DEV_TOOLS)
+  FetchContent_MakeAvailable(Catch2)
+endif()
 
 set(ORT_ROOT ${CMAKE_BINARY_DIR}/onnxruntime-win-x64-1.31.0)
 set(ORT_DLL ${ORT_ROOT}/lib/onnxruntime.dll)
@@ -112,6 +129,10 @@ target_include_directories(bt_stem PRIVATE
   ${soxr_SOURCE_DIR}/src
   ${soxr_BINARY_DIR})
 target_compile_definitions(bt_stem PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+get_target_property(soxr_type soxr TYPE)
+if(soxr_type STREQUAL "SHARED_LIBRARY")
+  target_compile_definitions(bt_stem PRIVATE SOXR_DLL)
+endif()
 target_compile_options(bt_stem PRIVATE /W4 /permissive- /utf-8)
 target_link_libraries(bt_stem PUBLIC soxr ${ORT_ROOT}/lib/onnxruntime.lib)
 target_link_libraries(bt_stem PRIVATE bcrypt)
@@ -122,28 +143,29 @@ function(bt_copy_runtime target)
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ORT_DLL} $<TARGET_FILE_DIR:${target}>
     VERBATIM)
+  get_target_property(soxr_type soxr TYPE)
+  if(soxr_type STREQUAL "SHARED_LIBRARY")
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:soxr> $<TARGET_FILE_DIR:${target}>
+      VERBATIM)
+  endif()
 endfunction()
 
 function(bt_copy_assets target)
   add_custom_command(TARGET ${target} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${target}>/models
-    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${target}>/fonts
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      ${BT_REPO_ROOT}/models/htdemucs_6s.onnx
-      $<TARGET_FILE_DIR:${target}>/models/htdemucs_6s.onnx
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      ${BT_REPO_ROOT}/models/nmp.onnx
-      $<TARGET_FILE_DIR:${target}>/models/nmp.onnx
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      ${BT_REPO_ROOT}/fonts/sarasa-gothic-tc-nerd-merged.ttf
-      $<TARGET_FILE_DIR:${target}>/fonts/sarasa-gothic-tc-nerd-merged.ttf
+    COMMAND ${CMAKE_COMMAND}
+      -DBT_SRC_DIR=${BT_REPO_ROOT}
+      -DBT_DST_DIR=$<TARGET_FILE_DIR:${target}>
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_assets.cmake
     VERBATIM)
 endfunction()
 
-add_executable(bt-separate apps/bt_separate/main.cpp)
-target_link_libraries(bt-separate PRIVATE bt_stem)
-target_compile_options(bt-separate PRIVATE /W4 /permissive- /utf-8)
-bt_copy_runtime(bt-separate)
+if(BT_DEV_TOOLS)
+  add_executable(bt-separate apps/bt_separate/main.cpp)
+  target_link_libraries(bt-separate PRIVATE bt_stem)
+  target_compile_options(bt-separate PRIVATE /W4 /permissive- /utf-8)
+  bt_copy_runtime(bt-separate)
+endif()
 
 add_library(bt_imgui STATIC
   ${IMGUI_DIR}/imgui.cpp
@@ -156,32 +178,46 @@ target_include_directories(bt_imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_compile_definitions(bt_imgui PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(bt_imgui PRIVATE /W3 /utf-8)
 
-add_executable(bt-app WIN32 apps/bt_app/main.cpp apps/bt_app/ui.cpp apps/bt_app/midi_view.cpp apps/bt_app/notes.cpp apps/bt_app/beats.cpp apps/bt_app/monitor.cpp)
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bt-app.rc.in
+  ${CMAKE_CURRENT_BINARY_DIR}/bt-app.rc
+  @ONLY)
+
+add_executable(bt-app WIN32
+  apps/bt_app/main.cpp
+  apps/bt_app/ui.cpp
+  apps/bt_app/midi_view.cpp
+  apps/bt_app/notes.cpp
+  apps/bt_app/beats.cpp
+  apps/bt_app/monitor.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/bt-app.rc)
 target_link_libraries(bt-app PRIVATE bt_stem bt_imgui d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi)
-target_compile_definitions(bt-app PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_definitions(bt-app PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN "BT_VERSION=\"${BT_VERSION}\"")
 target_compile_options(bt-app PRIVATE /W4 /permissive- /utf-8)
 bt_copy_runtime(bt-app)
 bt_copy_assets(bt-app)
 
-add_executable(bt_stem_tests
-  tests/test_host.cpp
-  tests/test_session.cpp
-  tests/test_player.cpp
-  tests/test_notes.cpp
-  tests/test_beats.cpp
-  tests/test_projects.cpp
-  tests/test_runtime.cpp
-  apps/bt_app/notes.cpp
-  apps/bt_app/beats.cpp
-  apps/bt_app/monitor.cpp
-  apps/bt_app/ui.cpp
-  apps/bt_app/midi_view.cpp)
-target_include_directories(bt_stem_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/apps/bt_app)
-target_link_libraries(bt_stem_tests PRIVATE bt_stem bt_imgui Catch2::Catch2WithMain d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi)
-target_compile_definitions(bt_stem_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_compile_options(bt_stem_tests PRIVATE /W4 /permissive- /utf-8)
-bt_copy_runtime(bt_stem_tests)
+if(BT_DEV_TOOLS)
+  add_executable(bt_stem_tests
+    tests/test_host.cpp
+    tests/test_session.cpp
+    tests/test_player.cpp
+    tests/test_notes.cpp
+    tests/test_beats.cpp
+    tests/test_projects.cpp
+    tests/test_runtime.cpp
+    apps/bt_app/notes.cpp
+    apps/bt_app/beats.cpp
+    apps/bt_app/monitor.cpp
+    apps/bt_app/ui.cpp
+    apps/bt_app/midi_view.cpp)
+  target_include_directories(bt_stem_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/apps/bt_app)
+  target_link_libraries(bt_stem_tests PRIVATE bt_stem bt_imgui Catch2::Catch2WithMain d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi)
+  target_compile_definitions(bt_stem_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(bt_stem_tests PRIVATE /W4 /permissive- /utf-8)
+  bt_copy_runtime(bt_stem_tests)
 
-include(CTest)
-include(${catch2_SOURCE_DIR}/extras/Catch.cmake)
-catch_discover_tests(bt_stem_tests)
+  include(CTest)
+  include(${catch2_SOURCE_DIR}/extras/Catch.cmake)
+  catch_discover_tests(bt_stem_tests)
+endif()

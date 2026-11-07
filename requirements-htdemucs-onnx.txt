@@ -1,0 +1,16 @@
+# htdemucs_6s ONNX slice.
+# Inference does not need PyTorch. Install this, then:
+#   python -m htdemucs6s_onnx separate song.wav stems/ --model models/htdemucs_6s.onnx
+
+numpy==1.26.4
+soundfile==0.14.0
+soxr>=0.5
+onnxruntime>=1.20
+
+# Export is a separate development step. demucs-onnx 0.3.4 needs PyTorch 2.4.x
+# (2.5 and later break the legacy ONNX exporter). The extra pulls demucs 4.0.1:
+#   python -m pip install "demucs-onnx[export]==0.3.4" "onnxruntime>=1.20" soundfile
+#   python -m htdemucs6s_onnx export models/htdemucs_6s.onnx
+#
+# The pitch model is already ONNX inside basic-pitch. This only extracts it:
+#   python tools/fetch_nmp_onnx.py
