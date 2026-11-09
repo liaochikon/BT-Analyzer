@@ -50,7 +50,8 @@ OnnxSegmentModel::OnnxSegmentModel(OnnxSegmentModel&&) noexcept = default;
 OnnxSegmentModel& OnnxSegmentModel::operator=(OnnxSegmentModel&&) noexcept = default;
 OnnxSegmentModel::~OnnxSegmentModel() = default;
 
-std::expected<OnnxSegmentModel, std::string> OnnxSegmentModel::open(const std::filesystem::path& model_path) {
+std::expected<OnnxSegmentModel, std::string> OnnxSegmentModel::open(
+    const std::filesystem::path& model_path, int intra_op_threads) {
     const OrtApi* api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
     if (api == nullptr) {
         return std::unexpected("ONNX Runtime API is unavailable");
@@ -121,11 +122,13 @@ std::expected<OnnxSegmentModel, std::string> OnnxSegmentModel::open(const std::f
     }
     return OnnxSegmentModel(std::move(impl));
     };
-    auto opened = attempt(ORT_ENABLE_ALL, true, 0);
+    const int preferred = intra_op_threads > 0 ? intra_op_threads : 0;
+    auto opened = attempt(ORT_ENABLE_ALL, true, preferred);
     if (opened || opened.error().find("bad allocation") == std::string::npos) {
         return opened;
     }
-    return attempt(ORT_ENABLE_BASIC, false, 4);
+    const int fallback = preferred > 0 ? preferred : 4;
+    return attempt(ORT_ENABLE_BASIC, false, fallback);
 }
 
 void OnnxSegmentModel::run(const float* mix, float* stems, int segment_samples) const {

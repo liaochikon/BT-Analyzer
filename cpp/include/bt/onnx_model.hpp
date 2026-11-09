@@ -11,7 +11,9 @@ namespace bt {
 
 class OnnxSegmentModel {
 public:
-    static std::expected<OnnxSegmentModel, std::string> open(const std::filesystem::path& model_path);
+    // intra_op_threads <= 0 keeps the runtime default; otherwise clamps to that count.
+    static std::expected<OnnxSegmentModel, std::string> open(
+        const std::filesystem::path& model_path, int intra_op_threads = 0);
 
     OnnxSegmentModel(OnnxSegmentModel&&) noexcept;
     OnnxSegmentModel& operator=(OnnxSegmentModel&&) noexcept;

@@ -285,30 +285,41 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     const auto model_path = locate_asset(exe_dir, cwd, "models/htdemucs_6s.onnx");
     const auto font_path = locate_asset(exe_dir, cwd, "fonts/sarasa-gothic-tc-nerd-merged.ttf");
 
+    const auto cache_directory = exe_dir / "cache";
+    const auto saves_directory = exe_dir / "saves";
+    btapp::App boot;
+    boot.cache_directory = cache_directory;
+    btapp::load_performance(boot);
+    const int demucs_threads = boot.demucs_threads;
+    const int note_workers = boot.note_workers;
+
     // Full graph optimization fails once the swap chain has reserved address space.
     auto model_slot = std::make_shared<std::unique_ptr<bt::OnnxSegmentModel>>();
     std::string model_error;
     if (model_path.empty()) {
         model_error = "找不到 models/htdemucs_6s.onnx";
     } else {
-        auto opened = bt::OnnxSegmentModel::open(model_path);
+        auto opened = bt::OnnxSegmentModel::open(model_path, demucs_threads);
         if (!opened) {
             model_error = opened.error();
         } else {
             *model_slot = std::make_unique<bt::OnnxSegmentModel>(std::move(*opened));
         }
     }
-        const auto pitch_path = locate_asset(exe_dir, cwd, "models/nmp.onnx");
-    std::unique_ptr<bt::BasicPitchModel> pitch_model;
+    const auto pitch_path = locate_asset(exe_dir, cwd, "models/nmp.onnx");
     std::string pitch_error;
-    if (!pitch_path.empty()) {
-        auto opened = bt::BasicPitchModel::open(pitch_path);
-        if (!opened) {
-            pitch_error = opened.error();
-        } else {
-            pitch_model = std::make_unique<bt::BasicPitchModel>(std::move(*opened));
+    std::unique_ptr<btapp::NoteService> note_service;
+    if (pitch_path.empty()) {
+        pitch_error = "找不到 models/nmp.onnx";
+    } else {
+        try {
+            note_service = std::make_unique<btapp::NoteService>(pitch_path, note_workers);
+        } catch (const std::exception& ex) {
+            pitch_error = ex.what();
+            note_service.reset();
         }
     }
+    const bool pitch_ready = note_service != nullptr;
 
     Gfx gfx;
     gfx.dpi_scale = dpi_scale;
@@ -349,13 +360,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     gfx.width = static_cast<UINT>(client.right - client.left);
     gfx.height = static_cast<UINT>(client.bottom - client.top);
 
-    const auto cache_directory = exe_dir / "cache";
-    const auto saves_directory = exe_dir / "saves";
     bt::migrate_project_folders(cache_directory / bt::kModelKey, saves_directory);
     bt::SessionOptions options;
     options.cache_directory = saves_directory;
     options.model_key.clear();
-    options.run_segment = [model_path, model_slot, model_error](const float* mix, float* stems, int segment_samples) {
+    options.run_segment = [model_path, model_slot, model_error, demucs_threads](
+                              const float* mix, float* stems, int segment_samples) {
         if (*model_slot == nullptr) {
             if (!model_error.empty()) {
                 throw std::runtime_error(model_error);
@@ -363,7 +373,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
             if (model_path.empty()) {
                 throw std::runtime_error("找不到 models/htdemucs_6s.onnx");
             }
-            auto opened = bt::OnnxSegmentModel::open(model_path);
+            auto opened = bt::OnnxSegmentModel::open(model_path, demucs_threads);
             if (!opened) {
                 throw std::runtime_error(opened.error());
             }
@@ -422,16 +432,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     app.hwnd = reinterpret_cast<HWND__*>(hwnd);
     app.cache_directory = cache_directory;
     app.saves_directory = saves_directory;
+    app.note_workers = note_workers;
+    app.demucs_threads = demucs_threads;
     app.device_note = player.device_error();
     btapp::load_output(app);
     app.model_note = model_error;
     app.pitch_note = pitch_error;
-    app.pitch_ready = pitch_model != nullptr;
+    app.pitch_ready = pitch_ready;
+    if (!pitch_path.empty()) {
+        app.pitch_model_path = pitch_path;
+    }
     std::unique_ptr<btapp::BeatService> beat_service = std::make_unique<btapp::BeatService>();
     app.beat_service = beat_service.get();
-    std::unique_ptr<btapp::NoteService> note_service;
-    if (pitch_model) {
-        note_service = std::make_unique<btapp::NoteService>(std::move(pitch_model));
+    if (note_service) {
         app.note_service = note_service.get();
     }
     Host host{&app, &gfx, &render_frame};

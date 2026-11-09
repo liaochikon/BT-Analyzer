@@ -5,8 +5,11 @@
 
 #include "bt/contract.hpp"
 
+#include <algorithm>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -25,12 +28,12 @@ bt::PitchParameters parameters_from_draft(const PitchDraft& draft) {
 }
 
 void queue_notes(App& app, const bt::SongSnapshot& song, int stem, bool refresh) {
-    if (stem < 0 || stem >= bt::kStemCount || song.stems == nullptr || song.cache_directory.empty() || app.note_service == nullptr) {
+    if (stem < 0 || stem >= bt::kStemCount || song.stems == nullptr || song.cache_directory.empty() ||
+        app.note_service == nullptr) {
         return;
     }
     const auto index = static_cast<std::size_t>(stem);
     app.note_status[index] = NoteStatus::Running;
-    app.note_progress = 0.f;
     app.note_detail[index].clear();
     const auto cache_file = song.cache_directory / (std::string(bt::kStemNames[index]) + ".notes");
     app.note_ticket[index] = app.note_service->request(
@@ -39,44 +42,122 @@ void queue_notes(App& app, const bt::SongSnapshot& song, int stem, bool refresh)
     log_stem(LogLevel::Info, app.language, stem, "轉譜開始", "转谱开始", "Transcribe", tail);
 }
 
+int clamp_workers(int workers) {
+    return std::clamp(workers, 1, 8);
+}
+
 }  // namespace
 
 struct NoteService::State {
     std::mutex mutex;
     std::condition_variable cv;
     bool stop = false;
-    bool has_request = false;
-    Request request;
+    std::deque<Request> queue;
     std::uint64_t ticket = 0;
     std::vector<Result> results;
-    std::atomic<float> progress{0.f};
-    std::thread worker;
+    std::vector<std::unique_ptr<bt::BasicPitchModel>> models;
+    std::vector<std::thread> workers;
+    std::unique_ptr<std::atomic<float>[]> slot_progress;
+    int slot_count = 0;
+    std::atomic<int> running{0};
 };
 
-NoteService::NoteService(std::unique_ptr<bt::BasicPitchModel> model)
-    : model_(std::move(model)), state_(std::make_unique<State>()) {
-    transcribe_ = [this](
-                      const float* samples, std::int64_t frames, const bt::PitchParameters& parameters,
-                      const std::function<void(float)>& progress, const std::function<bool()>& cancelled) {
-        return model_->transcribe(samples, frames, parameters, progress, cancelled);
-    };
-    state_->worker = std::thread([this] { thread_main(); });
+void NoteService::launch_workers(int workers) {
+    state_->stop = false;
+    state_->workers.clear();
+    state_->workers.reserve(static_cast<std::size_t>(workers));
+    for (int index = 0; index < workers; ++index) {
+        state_->workers.emplace_back([this, index] { worker_main(index); });
+    }
+}
+
+bool NoteService::rebuild_locked(int workers) {
+    workers = clamp_workers(workers);
+    std::vector<std::unique_ptr<bt::BasicPitchModel>> models;
+    if (!model_path_.empty()) {
+        models.reserve(static_cast<std::size_t>(workers));
+        for (int index = 0; index < workers; ++index) {
+            auto opened = bt::BasicPitchModel::open(model_path_);
+            if (!opened) {
+                return false;
+            }
+            models.push_back(std::make_unique<bt::BasicPitchModel>(std::move(*opened)));
+        }
+    }
+    state_->stop = true;
+    state_->queue.clear();
+    state_->models = std::move(models);
+    state_->slot_count = workers;
+    state_->slot_progress = std::make_unique<std::atomic<float>[]>(static_cast<std::size_t>(workers));
+    for (int index = 0; index < workers; ++index) {
+        state_->slot_progress[index].store(0.f);
+    }
+    return true;
+}
+
+NoteService::NoteService(const std::filesystem::path& model_path, int workers)
+    : model_path_(model_path), state_(std::make_unique<State>()) {
+    workers = clamp_workers(workers);
+    if (!rebuild_locked(workers)) {
+        throw std::runtime_error("cannot open pitch model pool");
+    }
+    launch_workers(workers);
 }
 
 NoteService::NoteService(Transcriber transcriber)
     : transcribe_(std::move(transcriber)), state_(std::make_unique<State>()) {
-    state_->worker = std::thread([this] { thread_main(); });
+    state_->slot_count = 1;
+    state_->slot_progress = std::make_unique<std::atomic<float>[]>(1);
+    state_->slot_progress[0].store(0.f);
+    launch_workers(1);
 }
 
 NoteService::~NoteService() {
     {
         std::lock_guard lock(state_->mutex);
         state_->stop = true;
+        state_->queue.clear();
     }
     state_->cv.notify_all();
-    if (state_->worker.joinable()) {
-        state_->worker.join();
+    for (auto& worker : state_->workers) {
+        if (worker.joinable()) {
+            worker.join();
+        }
     }
+}
+
+int NoteService::workers() const {
+    std::lock_guard lock(state_->mutex);
+    return std::max(1, static_cast<int>(state_->workers.size()));
+}
+
+bool NoteService::set_workers(int workers) {
+    workers = clamp_workers(workers);
+    std::vector<std::thread> old;
+    {
+        std::lock_guard lock(state_->mutex);
+        if (state_->running.load() > 0 || !state_->queue.empty()) {
+            return false;
+        }
+        if (static_cast<int>(state_->workers.size()) == workers) {
+            return true;
+        }
+        if (!rebuild_locked(workers)) {
+            return false;
+        }
+        old.swap(state_->workers);
+    }
+    state_->cv.notify_all();
+    for (auto& worker : old) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    {
+        std::lock_guard lock(state_->mutex);
+        launch_workers(workers);
+    }
+    return true;
 }
 
 std::uint64_t NoteService::request(
@@ -86,11 +167,10 @@ std::uint64_t NoteService::request(
     {
         std::lock_guard lock(state_->mutex);
         ticket = ++state_->ticket;
-        state_->request = Request{job, ticket, stem, std::move(cache_file), std::move(stems), parameters, refresh};
-        state_->has_request = true;
-        state_->progress.store(0.f);
+        state_->queue.push_back(
+            Request{job, ticket, stem, std::move(cache_file), std::move(stems), parameters, refresh});
     }
-    state_->cv.notify_all();
+    state_->cv.notify_one();
     return ticket;
 }
 
@@ -107,42 +187,67 @@ std::size_t NoteService::parked_results() {
 }
 
 float NoteService::progress() const {
-    return state_->progress.load();
+    float sum = 0.f;
+    int count = 0;
+    const int slots = state_->slot_count;
+    for (int index = 0; index < slots; ++index) {
+        const float fraction = state_->slot_progress[index].load();
+        if (fraction > 0.f || state_->running.load() > 0) {
+            sum += fraction;
+            ++count;
+        }
+    }
+    if (count <= 0) {
+        return 0.f;
+    }
+    return sum / static_cast<float>(count);
 }
 
-void NoteService::thread_main() {
+int NoteService::running_count() const {
+    return state_->running.load();
+}
+
+void NoteService::worker_main(int slot) {
     for (;;) {
         Request request;
         {
             std::unique_lock lock(state_->mutex);
-            state_->cv.wait(lock, [&] { return state_->stop || state_->has_request; });
-            if (state_->stop && !state_->has_request) {
+            state_->cv.wait(lock, [&] { return state_->stop || !state_->queue.empty(); });
+            if (state_->stop && state_->queue.empty()) {
                 return;
             }
-            request = std::move(state_->request);
-            state_->has_request = false;
+            request = std::move(state_->queue.front());
+            state_->queue.pop_front();
+            state_->running.fetch_add(1);
         }
         const auto ticket = request.ticket;
-        auto cancelled = [&] {
+        auto stop_requested = [&] {
             std::lock_guard lock(state_->mutex);
-            return state_->stop || state_->ticket != ticket;
+            return state_->stop;
         };
         auto finish = [&](Result result) {
-            std::lock_guard lock(state_->mutex);
-            if (state_->ticket != ticket) {
-                result.cancelled = true;
-                result.error.clear();
-                result.notes.clear();
+            {
+                std::lock_guard lock(state_->mutex);
+                state_->results.push_back(std::move(result));
             }
-            state_->results.push_back(std::move(result));
+            state_->running.fetch_sub(1);
+            if (slot >= 0 && slot < state_->slot_count) {
+                state_->slot_progress[slot].store(0.f);
+            }
         };
-        if (cancelled()) {
+        if (stop_requested()) {
             finish(Result{request.job, ticket, request.stem, true, {}, {}});
             continue;
+        }
+        if (slot >= 0 && slot < state_->slot_count) {
+            state_->slot_progress[slot].store(0.f);
         }
         if (!request.refresh && std::filesystem::exists(request.cache_file)) {
             auto loaded = bt::load_notes(request.cache_file);
             if (loaded) {
+                if (slot >= 0 && slot < state_->slot_count) {
+                    state_->slot_progress[slot].store(1.f);
+                }
                 finish(Result{request.job, ticket, request.stem, false, {}, std::move(*loaded)});
                 continue;
             }
@@ -157,20 +262,41 @@ void NoteService::thread_main() {
             finish(Result{request.job, ticket, request.stem, false, audio.error(), {}});
             continue;
         }
-        if (cancelled()) {
+        if (stop_requested()) {
             finish(Result{request.job, ticket, request.stem, true, {}, {}});
             continue;
         }
-        auto notes = transcribe_(
-            audio->data(), static_cast<std::int64_t>(audio->size()), request.parameters,
-            [&](float fraction) { state_->progress.store(fraction); },
-            [&] { return cancelled(); });
+        auto progress = [&](float fraction) {
+            if (slot >= 0 && slot < state_->slot_count) {
+                state_->slot_progress[slot].store(fraction);
+            }
+        };
+        std::expected<std::vector<bt::Note>, std::string> notes;
+        if (transcribe_) {
+            notes = transcribe_(
+                audio->data(), static_cast<std::int64_t>(audio->size()), request.parameters, progress, stop_requested);
+        } else {
+            bt::BasicPitchModel* model = nullptr;
+            {
+                std::lock_guard lock(state_->mutex);
+                if (slot >= 0 && slot < static_cast<int>(state_->models.size())) {
+                    model = state_->models[static_cast<std::size_t>(slot)].get();
+                }
+            }
+            if (model == nullptr) {
+                finish(Result{request.job, ticket, request.stem, false, "transcription model missing", {}});
+                continue;
+            }
+            notes = model->transcribe(
+                audio->data(), static_cast<std::int64_t>(audio->size()), request.parameters, progress, stop_requested);
+        }
         if (!notes) {
-            const bool was_cancelled = notes.error() == "cancelled" || cancelled();
-            finish(Result{request.job, ticket, request.stem, was_cancelled, was_cancelled ? std::string{} : notes.error(), {}});
+            const bool was_cancelled = notes.error() == "cancelled" || stop_requested();
+            finish(Result{
+                request.job, ticket, request.stem, was_cancelled, was_cancelled ? std::string{} : notes.error(), {}});
             continue;
         }
-        if (cancelled()) {
+        if (stop_requested()) {
             finish(Result{request.job, ticket, request.stem, true, {}, {}});
             continue;
         }
@@ -178,7 +304,7 @@ void NoteService::thread_main() {
             finish(Result{request.job, ticket, request.stem, false, stored.error(), {}});
             continue;
         }
-        state_->progress.store(1.f);
+        progress(1.f);
         finish(Result{request.job, ticket, request.stem, false, {}, std::move(*notes)});
     }
 }
@@ -199,24 +325,23 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
     if (app.note_service != nullptr) {
         app.note_progress = app.note_service->progress();
         for (auto& result : app.note_service->poll()) {
-            if (result.job != app.note_song || result.stem < 0 || result.stem >= bt::kStemCount) {
+            if (result.stem < 0 || result.stem >= bt::kStemCount) {
                 continue;
             }
             const auto index = static_cast<std::size_t>(result.stem);
             if (result.ticket != app.note_ticket[index]) {
                 continue;
             }
+            app.note_refresh[index] = false;
             if (result.cancelled) {
                 if (app.note_status[index] == NoteStatus::Running) {
                     app.note_status[index] = NoteStatus::Idle;
-                    log_stem(LogLevel::Warn, app.language, result.stem, "轉譜已取消", "转谱已取消", "Transcribe cancelled");
                 }
                 continue;
             }
             if (!result.error.empty()) {
                 app.note_status[index] = NoteStatus::Failed;
                 app.note_detail[index] = result.error;
-                app.note_refresh[index] = false;
                 log_stem(LogLevel::Error, app.language, result.stem, "轉譜失敗", "转谱失败", "Transcribe failed", " · " + result.error);
                 continue;
             }
@@ -227,8 +352,9 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
             }
             app.note_status[index] = NoteStatus::Ready;
             app.note_detail[index].clear();
-            app.note_refresh[index] = false;
-            log_stem(LogLevel::Info, app.language, result.stem, "轉譜完成", "转谱完成", "Transcribed", " · " + std::to_string(result.notes.size()));
+            log_stem(
+                LogLevel::Info, app.language, result.stem, "轉譜完成", "转谱完成", "Transcribed",
+                " · " + std::to_string(result.notes.size()));
         }
     }
     if (song.phase != bt::SongPhase::Ready || song.stems == nullptr || song.job == app.closed_job) {
@@ -251,22 +377,25 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
     if (song.cache_directory.empty()) {
         return;
     }
-    for (int stem = 0; stem < bt::kStemCount; ++stem) {
+
+    const int capacity = app.note_service->workers();
+    int inflight = 0;
+    for (NoteStatus status : app.note_status) {
+        if (status == NoteStatus::Running) {
+            ++inflight;
+        }
+    }
+    for (int stem = 0; stem < bt::kStemCount && inflight < capacity; ++stem) {
         const auto index = static_cast<std::size_t>(stem);
         if (app.note_refresh[index] && app.note_status[index] != NoteStatus::Running) {
             queue_notes(app, song, stem, true);
-            return;
+            ++inflight;
         }
     }
-    for (NoteStatus status : app.note_status) {
-        if (status == NoteStatus::Running) {
-            return;
-        }
-    }
-    for (int stem = 0; stem < bt::kStemCount; ++stem) {
+    for (int stem = 0; stem < bt::kStemCount && inflight < capacity; ++stem) {
         if (app.note_status[static_cast<std::size_t>(stem)] == NoteStatus::Idle) {
             queue_notes(app, song, stem, false);
-            return;
+            ++inflight;
         }
     }
 }

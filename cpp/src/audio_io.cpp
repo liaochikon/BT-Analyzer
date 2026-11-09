@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <fstream>
 #include <soxr.h>
@@ -234,6 +235,40 @@ std::expected<void, std::string> write_float_wav(
     format.channels = static_cast<drwav_uint32>(channels);
     format.sampleRate = static_cast<drwav_uint32>(sample_rate);
     format.bitsPerSample = 32;
+    drwav wav{};
+    const std::wstring wide = path.wstring();
+    if (!drwav_init_file_write_w(&wav, wide.c_str(), &format, nullptr)) {
+        return std::unexpected("cannot write " + utf8_of(path));
+    }
+    const auto written = drwav_write_pcm_frames(&wav, static_cast<drwav_uint64>(frames), interleaved.data());
+    drwav_uninit(&wav);
+    if (written != static_cast<drwav_uint64>(frames)) {
+        return std::unexpected("short write " + utf8_of(path));
+    }
+    return {};
+}
+
+std::expected<void, std::string> write_pcm16_wav(
+    const std::filesystem::path& path, const float* channel_major, int channels,
+    std::int64_t frames, int sample_rate) {
+    if (channels <= 0 || frames < 0 || channel_major == nullptr) {
+        return std::unexpected("cannot write empty wav");
+    }
+    std::vector<std::int16_t> interleaved(static_cast<std::size_t>(frames * channels));
+    for (std::int64_t frame = 0; frame < frames; ++frame) {
+        for (int channel = 0; channel < channels; ++channel) {
+            const float sample = std::clamp(channel_major[channel * frames + frame], -1.f, 1.f);
+            interleaved[static_cast<std::size_t>(frame * channels + channel)] =
+                static_cast<std::int16_t>(std::lround(sample * 32767.f));
+        }
+    }
+
+    drwav_data_format format{};
+    format.container = drwav_container_riff;
+    format.format = DR_WAVE_FORMAT_PCM;
+    format.channels = static_cast<drwav_uint32>(channels);
+    format.sampleRate = static_cast<drwav_uint32>(sample_rate);
+    format.bitsPerSample = 16;
     drwav wav{};
     const std::wstring wide = path.wstring();
     if (!drwav_init_file_write_w(&wav, wide.c_str(), &format, nullptr)) {

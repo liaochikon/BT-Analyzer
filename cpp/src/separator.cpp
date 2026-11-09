@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <future>
 #include <string>
 
 namespace bt {
@@ -141,17 +142,32 @@ std::expected<Stems, std::string> separate_audio(
 
     std::vector<float> accum(static_cast<std::size_t>(kStemCount * 2 * frames), 0.f);
     std::vector<float> sum_weight(static_cast<std::size_t>(frames), 0.f);
-    std::vector<float> padded(static_cast<std::size_t>(2 * segment), 0.f);
+    std::array<std::vector<float>, 2> padded{
+        std::vector<float>(static_cast<std::size_t>(2 * segment), 0.f),
+        std::vector<float>(static_cast<std::size_t>(2 * segment), 0.f),
+    };
     std::vector<float> raw(static_cast<std::size_t>(kStemCount * 2 * segment), 0.f);
+    std::array<std::int64_t, 2> chunk_lengths{0, 0};
+    int cur = 0;
+    chunk_lengths[0] = pad_segment(norm.samples.data(), frames, offsets[0], segment, padded[0].data());
 
     for (std::size_t index = 0; index < offsets.size(); ++index) {
         if (cancelled && cancelled()) {
             return std::unexpected(std::string(kSeparationCancelled));
         }
+        const int next = 1 - cur;
+        std::future<void> prep;
+        if (index + 1 < offsets.size()) {
+            prep = std::async(std::launch::async, [&, next, index] {
+                chunk_lengths[static_cast<std::size_t>(next)] = pad_segment(
+                    norm.samples.data(), frames, offsets[index + 1], segment, padded[static_cast<std::size_t>(next)].data());
+            });
+        }
+
         const std::int64_t offset = offsets[index];
-        const std::int64_t chunk_length = pad_segment(norm.samples.data(), frames, offset, segment, padded.data());
+        const std::int64_t chunk_length = chunk_lengths[static_cast<std::size_t>(cur)];
         std::fill(raw.begin(), raw.end(), 0.f);
-        run(padded.data(), raw.data(), segment);
+        run(padded[static_cast<std::size_t>(cur)].data(), raw.data(), segment);
 
         const std::int64_t delta = segment - chunk_length;
         const std::int64_t trim = delta / 2;
@@ -166,6 +182,10 @@ std::expected<Stems, std::string> separate_audio(
         }
         for (std::int64_t i = 0; i < chunk_length; ++i) {
             sum_weight[static_cast<std::size_t>(offset + i)] += weight[static_cast<std::size_t>(i)];
+        }
+        if (prep.valid()) {
+            prep.get();
+            cur = next;
         }
         if (progress) {
             progress(static_cast<float>(index + 1) / static_cast<float>(offsets.size()));
@@ -207,7 +227,7 @@ std::expected<void, std::string> write_stems(const std::filesystem::path& direct
     }
     for (int stem = 0; stem < kStemCount; ++stem) {
         const auto path = directory / (std::string(kStemNames[static_cast<std::size_t>(stem)]) + ".wav");
-        auto written = write_float_wav(path, stems.audio[static_cast<std::size_t>(stem)].data(), 2, stems.frames);
+        auto written = write_pcm16_wav(path, stems.audio[static_cast<std::size_t>(stem)].data(), 2, stems.frames);
         if (!written) {
             return written;
         }

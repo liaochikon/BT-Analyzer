@@ -25,6 +25,11 @@ std::expected<void, std::string> write_float_wav(
     const std::filesystem::path& path, const float* channel_major, int channels,
     std::int64_t frames, int sample_rate = kSampleRate);
 
+// Project cache stems. Channel-major float in [-1, 1] is quantized to PCM16.
+std::expected<void, std::string> write_pcm16_wav(
+    const std::filesystem::path& path, const float* channel_major, int channels,
+    std::int64_t frames, int sample_rate = kSampleRate);
+
 std::expected<Audio, std::string> read_float_wav(const std::filesystem::path& path);
 
 }  // namespace bt

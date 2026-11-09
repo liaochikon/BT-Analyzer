@@ -2,6 +2,7 @@
 
 #include "bt/player.hpp"
 #include "bt/session.hpp"
+#include "keys.hpp"
 
 #include <algorithm>
 #include <array>
@@ -274,6 +275,30 @@ public:
     static void draw(float x, float y, float height, float left, float right);
 };
 
+class ProgressBar {
+public:
+    static float default_height();
+
+    ProgressBar(const char* id, float fraction) : id_(id), fraction_(fraction) {}
+    ProgressBar& size(float width, float height) {
+        width_ = width;
+        height_ = height;
+        return *this;
+    }
+    ProgressBar& overlay(const char* text) {
+        overlay_ = text == nullptr ? "" : text;
+        return *this;
+    }
+    void draw() const;
+
+private:
+    const char* id_;
+    float fraction_ = 0.f;
+    float width_ = -1.f;
+    float height_ = 0.f;
+    const char* overlay_ = "";
+};
+
 class SideRow {
 public:
     enum class Dock { Left, Right };
@@ -358,6 +383,7 @@ struct App {
     float master_meter_r = 0.f;
     float speed = 1.f;
     float applied_speed = 1.f;
+    float seek_step = 5.f;
     float master_db = 0.f;
     bool metro = true;
     float bpm = 120.f;
@@ -403,6 +429,11 @@ struct App {
     float note_progress = 0.f;
     bool pitch_ready = false;
     std::string pitch_note;
+    std::filesystem::path pitch_model_path;
+    int note_workers = 4;
+    int demucs_threads = 4;
+    Keymap keymap = default_keymap();
+    int keymap_capture = -1;
     int language = 0;
     bool language_loaded = false;
     int wave_drag = -1;
@@ -465,6 +496,8 @@ void edit_loop_drag(App& app, double seconds, double length);
 
 void draw(App& app);
 void load_output(App& app);
+void load_performance(App& app);
+void save_performance(const App& app);
 bool interface_locked(const App& app);
 std::optional<std::filesystem::path> pick_audio(HWND__* hwnd);
 std::vector<char> read_binary(const std::filesystem::path& path);

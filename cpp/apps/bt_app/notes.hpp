@@ -25,12 +25,18 @@ using Transcriber = std::function<std::expected<std::vector<bt::Note>, std::stri
 
 class NoteService {
 public:
-    explicit NoteService(std::unique_ptr<bt::BasicPitchModel> model);
+    // Opens one Basic Pitch session per worker. workers is clamped to [1, 8].
+    explicit NoteService(const std::filesystem::path& model_path, int workers);
+    // Test helper: one worker around a callable transcriber.
     explicit NoteService(Transcriber transcriber);
     ~NoteService();
 
     NoteService(const NoteService&) = delete;
     NoteService& operator=(const NoteService&) = delete;
+
+    int workers() const;
+    // Rebuilds the pool when idle. Returns false if a job is still running.
+    bool set_workers(int workers);
 
     std::uint64_t request(
         std::uint64_t job, int stem, std::filesystem::path cache_file, std::shared_ptr<const bt::Stems> stems,
@@ -48,6 +54,7 @@ public:
     std::vector<Result> poll();
     std::size_t parked_results();
     float progress() const;
+    int running_count() const;
 
 private:
     struct Request {
@@ -60,9 +67,11 @@ private:
         bool refresh = false;
     };
 
-    void thread_main();
+    void worker_main(int slot);
+    void launch_workers(int workers);
+    bool rebuild_locked(int workers);
 
-    std::unique_ptr<bt::BasicPitchModel> model_;
+    std::filesystem::path model_path_;
     Transcriber transcribe_;
     struct State;
     std::unique_ptr<State> state_;

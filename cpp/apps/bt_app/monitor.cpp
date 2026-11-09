@@ -331,7 +331,12 @@ void draw_song(const App& app, const bt::SongSnapshot& song, const bt::Player::S
     ImGui::TextUnformatted(name.empty() ? pick(language, "沒有歌曲", "没有歌曲", "No song") : name.c_str());
     ImGui::TextDisabled("%s", phase_label(song.phase, song.from_cache, language));
     if (song.phase == bt::SongPhase::Decoding || song.phase == bt::SongPhase::Separating) {
-        draw_mono_progress("separate", song.phase == bt::SongPhase::Separating ? song.progress : 0.f, -1.f, 0.f, nullptr);
+        const float fraction = song.phase == bt::SongPhase::Separating ? song.progress : 0.f;
+        char overlay[64];
+        std::snprintf(
+            overlay, sizeof overlay, "%s  %.0f%%", phase_label(song.phase, song.from_cache, language),
+            std::clamp(fraction, 0.f, 1.f) * 100.f);
+        ProgressBar("separate", fraction).overlay(overlay).draw();
     }
     const int position = static_cast<int>(transport.position);
     const int length = static_cast<int>(transport.length);
@@ -343,23 +348,29 @@ void draw_song(const App& app, const bt::SongSnapshot& song, const bt::Player::S
 void draw_jobs(const App& app) {
     const int language = app.language;
     ImGui::SeparatorText(pick(language, "工作", "工作", "Jobs"));
+    bool notes_running = false;
     if (ImGui::BeginTable("jobs", 2, ImGuiTableFlags_SizingStretchProp)) {
         for (int stem = 0; stem < bt::kStemCount; ++stem) {
             const auto status = app.note_status[static_cast<std::size_t>(stem)];
+            notes_running = notes_running || status == NoteStatus::Running;
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             ImGui::TextUnformatted(stem_name(stem, language));
             ImGui::TableSetColumnIndex(1);
             ImGui::TextColored(note_state_color(status), "%s", note_state_text(status, language));
-            if (status == NoteStatus::Running) {
-                ImGui::SameLine();
-                draw_mono_progress("note", app.note_progress, 80.f * ImGui::GetIO().FontGlobalScale, 0.f, nullptr);
-            } else if (status == NoteStatus::Failed && !app.note_detail[static_cast<std::size_t>(stem)].empty()) {
+            if (status == NoteStatus::Failed && !app.note_detail[static_cast<std::size_t>(stem)].empty()) {
                 ImGui::SameLine();
                 ImGui::TextDisabled("%s", app.note_detail[static_cast<std::size_t>(stem)].c_str());
             }
         }
         ImGui::EndTable();
+    }
+    if (notes_running) {
+        char overlay[64];
+        std::snprintf(
+            overlay, sizeof overlay, "%s  %.0f%%", pick(language, "轉譜中", "转谱中", "Transcribing"),
+            std::clamp(app.note_progress, 0.f, 1.f) * 100.f);
+        ProgressBar("notes", app.note_progress).overlay(overlay).draw();
     }
     const char* beat = pick(language, "閒置", "闲置", "Idle");
     if (app.beat_pending) {
@@ -481,40 +492,7 @@ void log_startup(const App& app) {
 }
 
 void draw_mono_progress(const char* id, float fraction, float width, float height, const char* overlay) {
-    fraction = std::clamp(fraction, 0.f, 1.f);
-    if (height <= 0.f) {
-        height = ImGui::GetFrameHeight();
-    }
-    if (width < 0.f) {
-        width = std::max(1.f, ImGui::GetContentRegionAvail().x);
-    }
-    ImGui::PushID(id);
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("bar", ImVec2(width, height));
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    const ImVec2 corner(origin.x + width, origin.y + height);
-    const float rounding = std::min(4.f, height * 0.35f);
-    draw->AddRectFilled(origin, corner, IM_COL32(17, 17, 17, 255), rounding);
-    const float fill = std::clamp(width * fraction, 0.f, width);
-    if (fill > 1.f) {
-        const float inset = 1.f;
-        const float right = fraction >= 1.f ? corner.x - inset : origin.x + fill;
-        draw->AddRectFilled(
-            ImVec2(origin.x + inset, origin.y + inset), ImVec2(std::max(origin.x + inset + 1.f, right), corner.y - inset),
-            IM_COL32(242, 242, 242, 255), std::max(0.f, rounding - 1.f));
-    }
-    draw->AddRect(origin, corner, IM_COL32(242, 242, 242, 255), rounding);
-    if (overlay != nullptr && overlay[0] != '\0') {
-        const ImVec2 text = ImGui::CalcTextSize(overlay);
-        const ImVec2 pos(origin.x + (width - text.x) * 0.5f, origin.y + (height - text.y) * 0.5f);
-        draw->PushClipRect(origin, ImVec2(origin.x + fill, corner.y), true);
-        draw->AddText(pos, IM_COL32(26, 26, 26, 255), overlay);
-        draw->PopClipRect();
-        draw->PushClipRect(ImVec2(origin.x + fill, origin.y), corner, true);
-        draw->AddText(pos, IM_COL32(242, 242, 242, 255), overlay);
-        draw->PopClipRect();
-    }
-    ImGui::PopID();
+    ProgressBar(id, fraction).size(width, height).overlay(overlay).draw();
 }
 
 void draw_monitor(App& app) {

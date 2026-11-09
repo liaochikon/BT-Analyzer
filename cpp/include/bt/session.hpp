@@ -94,12 +94,10 @@ private:
     void publish(std::shared_ptr<SongSnapshot> next);
 
     struct CacheHit {
-        std::shared_ptr<const Audio> mix;
         std::shared_ptr<const Stems> stems;
     };
     std::expected<std::shared_ptr<CacheHit>, std::string> load_cache(const std::filesystem::path& directory) const;
-    std::expected<void, std::string> store_cache(
-        const std::filesystem::path& directory, const Audio& mix, const Stems& stems) const;
+    std::expected<void, std::string> store_cache(const std::filesystem::path& directory, const Stems& stems) const;
 
     SessionOptions options_;
     struct State;

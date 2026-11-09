@@ -186,12 +186,13 @@ configure_file(
 add_executable(bt-app WIN32
   apps/bt_app/main.cpp
   apps/bt_app/ui.cpp
+  apps/bt_app/keys.cpp
   apps/bt_app/midi_view.cpp
   apps/bt_app/notes.cpp
   apps/bt_app/beats.cpp
   apps/bt_app/monitor.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/bt-app.rc)
-target_link_libraries(bt-app PRIVATE bt_stem bt_imgui d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi)
+target_link_libraries(bt-app PRIVATE bt_stem bt_imgui d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi imm32)
 target_compile_definitions(bt-app PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN "BT_VERSION=\"${BT_VERSION}\"")
 target_compile_options(bt-app PRIVATE /W4 /permissive- /utf-8)
 bt_copy_runtime(bt-app)
@@ -210,9 +211,10 @@ if(BT_DEV_TOOLS)
     apps/bt_app/beats.cpp
     apps/bt_app/monitor.cpp
     apps/bt_app/ui.cpp
+    apps/bt_app/keys.cpp
     apps/bt_app/midi_view.cpp)
   target_include_directories(bt_stem_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/apps/bt_app)
-  target_link_libraries(bt_stem_tests PRIVATE bt_stem bt_imgui Catch2::Catch2WithMain d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi)
+  target_link_libraries(bt_stem_tests PRIVATE bt_stem bt_imgui Catch2::Catch2WithMain d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi imm32)
   target_compile_definitions(bt_stem_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_compile_options(bt_stem_tests PRIVATE /W4 /permissive- /utf-8)
   bt_copy_runtime(bt_stem_tests)

@@ -110,29 +110,21 @@ bool valid_model_key(const std::string& key) {
     return !key.empty() && key != "." && key != ".." && key.find_first_of("\\/:") == std::string::npos;
 }
 
-std::expected<std::shared_ptr<const Audio>, std::string> read_mix(const std::filesystem::path& path) {
-    auto audio = read_float_wav(path);
-    if (!audio) {
-        return std::unexpected(audio.error());
-    }
-    if (audio->sample_rate != kSampleRate || audio->channels <= 0 || audio->frames <= 0) {
-        return std::unexpected("cached mix is not 44100 Hz audio");
-    }
-    return std::make_shared<const Audio>(std::move(*audio));
-}
-
-std::expected<std::shared_ptr<const Stems>, std::string> read_cached_stems(
-    const std::filesystem::path& directory, std::int64_t frames) {
+std::expected<std::shared_ptr<const Stems>, std::string> read_cached_stems(const std::filesystem::path& directory) {
     auto stems = std::make_shared<Stems>();
-    stems->frames = frames;
     for (int stem = 0; stem < kStemCount; ++stem) {
         const auto name = std::string(kStemNames[static_cast<std::size_t>(stem)]);
         auto audio = read_float_wav(directory / (name + ".wav"));
         if (!audio) {
             return std::unexpected(audio.error());
         }
-        if (audio->sample_rate != kSampleRate || audio->channels != 2 || audio->frames != frames) {
-            return std::unexpected("cached " + name + " does not match the mix");
+        if (audio->sample_rate != kSampleRate || audio->channels != 2 || audio->frames <= 0) {
+            return std::unexpected("cached " + name + " is not 44100 Hz stereo");
+        }
+        if (stem == 0) {
+            stems->frames = audio->frames;
+        } else if (audio->frames != stems->frames) {
+            return std::unexpected("cached " + name + " length does not match drums");
         }
         stems->audio[static_cast<std::size_t>(stem)] = std::move(audio->samples);
     }
@@ -498,22 +490,17 @@ std::expected<std::shared_ptr<Session::CacheHit>, std::string> Session::load_cac
         return nullptr;
     };
 
-    auto mix = read_mix(directory / "mix.wav");
-    if (!mix) {
-        return fail(mix.error());
-    }
-    auto stems = read_cached_stems(directory, (*mix)->frames);
+    auto stems = read_cached_stems(directory);
     if (!stems) {
         return fail(stems.error());
     }
     auto hit = std::make_shared<CacheHit>();
-    hit->mix = std::move(*mix);
     hit->stems = std::move(*stems);
     return hit;
 }
 
 std::expected<void, std::string> Session::store_cache(
-    const std::filesystem::path& directory, const Audio& mix, const Stems& stems) const {
+    const std::filesystem::path& directory, const Stems& stems) const {
     const auto temporary = directory.parent_path() / (directory.filename().wstring() + L".tmp");
     std::error_code error;
     std::filesystem::remove_all(temporary, error);
@@ -522,12 +509,6 @@ std::expected<void, std::string> Session::store_cache(
         return std::unexpected("cannot create " + utf8_of(temporary));
     }
     try {
-        if (auto written = write_float_wav(
-                temporary / "mix.wav", mix.samples.data(), mix.channels, mix.frames, mix.sample_rate);
-            !written) {
-            std::filesystem::remove_all(temporary, error);
-            return written;
-        }
         if (auto written = write_stems(temporary, stems); !written) {
             std::filesystem::remove_all(temporary, error);
             return written;
@@ -603,7 +584,7 @@ void Session::run_open(const Command& command) {
             state_->project_hash = committed->hash;
             state_->project_name = committed->name;
         }
-        state_->mix = (*cached)->mix;
+        state_->mix.reset();
         state_->stems = (*cached)->stems;
         publish(blank(SongPhase::Ready, 1.f, true, {}));
         return;
@@ -645,7 +626,7 @@ void Session::run_open(const Command& command) {
         return;
     }
 
-    if (auto stored = store_cache(state_->cache_directory, *state_->mix, *separated); !stored) {
+    if (auto stored = store_cache(state_->cache_directory, *separated); !stored) {
         publish(blank(SongPhase::Failed, 1.f, false, stored.error()));
         return;
     }
@@ -655,6 +636,7 @@ void Session::run_open(const Command& command) {
         state_->project_name = committed->name;
     }
     state_->stems = std::make_shared<const Stems>(std::move(*separated));
+    state_->mix.reset();
     publish(blank(SongPhase::Ready, 1.f, false, {}));
 }
 
@@ -695,7 +677,7 @@ void Session::run_open_cache(const Command& command) {
         publish(blank(SongPhase::Cancelled, 0.f, false, {}));
         return;
     }
-    state_->mix = (*cached)->mix;
+    state_->mix.reset();
     state_->stems = (*cached)->stems;
     publish(blank(SongPhase::Ready, 1.f, true, {}));
 }
