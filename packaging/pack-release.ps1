@@ -16,7 +16,6 @@ $required = @(
     'bt-app.exe',
     'onnxruntime.dll',
     'soxr.dll',
-    'models\htdemucs_6s.onnx',
     'models\nmp.onnx',
     'fonts\sarasa-gothic-tc-nerd-merged.ttf'
 )
@@ -78,7 +77,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stage 'licenses') | Out-Nu
 Copy-Item -LiteralPath (Join-Path $built 'bt-app.exe') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $built 'onnxruntime.dll') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $built 'soxr.dll') -Destination $stage
-Copy-Item -LiteralPath (Join-Path $built 'models\htdemucs_6s.onnx') -Destination (Join-Path $stage 'models')
+# BS-RoFormer SW weights stay out of the zip. The user supplies models/bs_roformer_sw.onnx.
 Copy-Item -LiteralPath (Join-Path $built 'models\nmp.onnx') -Destination (Join-Path $stage 'models')
 Copy-Item -LiteralPath (Join-Path $built 'fonts\sarasa-gothic-tc-nerd-merged.ttf') -Destination (Join-Path $stage 'fonts')
 Get-ChildItem -LiteralPath $crt -Filter '*.dll' | Copy-Item -Destination $stage

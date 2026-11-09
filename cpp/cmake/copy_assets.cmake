@@ -3,7 +3,6 @@ if(NOT DEFINED BT_SRC_DIR OR NOT DEFINED BT_DST_DIR)
 endif()
 
 set(assets
-  models/htdemucs_6s.onnx
   models/nmp.onnx
   fonts/sarasa-gothic-tc-nerd-merged.ttf)
 

@@ -2,10 +2,9 @@ BT-Analyzer 的程式碼是 MIT，著作權 2026 Liaochikon，全文在 LICENSE.
 
 這個壓縮檔另外帶了這些東西，授權全文在 licenses：
 
-- models/htdemucs_6s.onnx
-  Demucs 的 htdemucs_6s 模型，MIT。
-  Copyright (c) Meta Platforms, Inc. and affiliates.
-  licenses/demucs-MIT.txt
+- 分軌權重不在這個壓縮檔裡。
+  BS-RoFormer SW 請自行放到 models/bs_roformer_sw.onnx。
+  這份權重沒有隨程式發佈，也不會被 build.bat 打進壓縮檔。
 
 - models/nmp.onnx
   Spotify basic-pitch 0.4.0 的轉譜模型，Apache 2.0。

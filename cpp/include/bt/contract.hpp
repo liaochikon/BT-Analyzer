@@ -16,6 +16,7 @@ inline constexpr std::array<std::string_view, kStemCount> kStemNames = {
 
 inline constexpr std::string_view kInputName = "mix";
 inline constexpr std::string_view kOutputName = "stems";
-inline constexpr std::string_view kModelKey = "htdemucs_6s";
+// Project folders for this branch. Kept apart from htdemucs_6s caches.
+inline constexpr std::string_view kModelKey = "bs_roformer_sw";
 
 }  // namespace bt

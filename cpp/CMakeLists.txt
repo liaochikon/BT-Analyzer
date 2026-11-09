@@ -115,6 +115,7 @@ add_library(bt_stem STATIC
   src/audio_io.cpp
   src/separator.cpp
   src/onnx_model.cpp
+  src/roformer.cpp
   src/basic_pitch.cpp
   src/session.cpp
   src/time_stretch.cpp
@@ -201,6 +202,7 @@ bt_copy_assets(bt-app)
 if(BT_DEV_TOOLS)
   add_executable(bt_stem_tests
     tests/test_host.cpp
+    tests/test_roformer.cpp
     tests/test_session.cpp
     tests/test_player.cpp
     tests/test_notes.cpp

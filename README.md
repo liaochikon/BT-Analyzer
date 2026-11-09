@@ -12,7 +12,7 @@ BT-Analyzer 是基於 Demucs 和 Basic Pitch 的轉譜工具，主要用來加�
 
 ## 特色
 
-- **AI 分軌**：匯入音樂後可自動拆成六軌（鼓、貝斯、其他、人聲、吉他、鋼琴）
+- **AI 分軌**：匯入音樂後用 BS-RoFormer SW 拆成六軌（鼓、貝斯、其他、人聲、吉他、鋼琴）。權重自行放到 `models`，發行壓縮檔不附。
 - **混音控制**：即時調整各音軌音量、左右（pan）、靜音、獨奏
 - **多功能播放器**：支援變速播放、AB 循環、數四拍
 - **自動節拍**：節拍器可自動推算歌曲節拍，支援浮動 BPM
@@ -87,16 +87,16 @@ BT-Analyzer 是基於 Demucs 和 Basic Pitch 的轉譜工具，主要用來加�
 
 ## 建置
 
-需要 Windows 10/11（64 位元）、Visual Studio 2022（MSVC）、CMake。模型匯出另需 Python 3.10+。
+需要 Windows 10/11（64 位元）、Visual Studio 2022（MSVC）、CMake。轉譜模型另需 Python 3.10+。
+
+把 BS-RoFormer SW 的 ONNX 放到 `models/bs_roformer_sw.onnx`（`bs_roformer_sw_6stem_fp32.onnx` 或 `bs_roformer_sw_6stem_fp16.onnx` 也可以）。這個檔已在 `.gitignore`，`build.bat` 的壓縮檔不會帶它。圖的輸入是 `spec_real`、`spec_imag`，形狀 `[1, 2, 1025, T]`；輸出是 `out_spec_real`、`out_spec_imag`，形狀 `[1, 6, 2, 1025, T]`，`T` 必須固定。切塊長度是 `(T - 1) × 512`。和 UVR 同一套 588800 樣本切塊時，`T` 是 1151。`T = 345` 的 4 秒匯出也能載入，分離會比較粗。
 
 ```bat
 python tools/fetch_nmp_onnx.py
-python -m pip install "demucs-onnx[export]==0.3.4" "onnxruntime>=1.20" soundfile
-python -m htdemucs6s_onnx export models/htdemucs_6s.onnx
 build.bat
 ```
 
-產出：`dist\BT-Analyzer-<版本>-win64.zip`。版本號在 `VERSION`。
+產出：`dist\BT-Analyzer-<版本>-win64.zip`。版本號在 `VERSION`。壓縮檔含轉譜模型，不含分軌權重。
 
 ## 授權
 

@@ -1,4 +1,4 @@
-#include "bt/onnx_model.hpp"
+#include "bt/roformer.hpp"
 #include "bt/session.hpp"
 
 #include <algorithm>
@@ -21,8 +21,8 @@
 namespace {
 
 void print_usage() {
-    std::cerr << "bt-separate --model <htdemucs_6s.onnx> <audio> <output-dir> [--reference <stem-dir>]\n"
-              << "bt-separate --model <htdemucs_6s.onnx> --cache <dir> <audio> [--reference <stem-dir>]\n";
+    std::cerr << "bt-separate --model <bs_roformer_sw.onnx> <audio> <output-dir> [--reference <stem-dir>]\n"
+              << "bt-separate --model <bs_roformer_sw.onnx> --cache <dir> <audio> [--reference <stem-dir>]\n";
 }
 
 struct Args {
@@ -129,26 +129,21 @@ int compare_reference(const bt::Stems& stems, const std::filesystem::path& refer
 }
 
 int run_cached(const Args& args) {
-    struct LazyModel {
-        std::filesystem::path path;
-        std::shared_ptr<std::unique_ptr<bt::OnnxSegmentModel>> model =
-            std::make_shared<std::unique_ptr<bt::OnnxSegmentModel>>();
-
-        void operator()(const float* mix, float* stems, int segment_samples) const {
-            if (*model == nullptr) {
-                auto opened = bt::OnnxSegmentModel::open(path);
-                if (!opened) {
-                    throw std::runtime_error(opened.error());
-                }
-                *model = std::make_unique<bt::OnnxSegmentModel>(std::move(*opened));
-            }
-            (*model)->run(mix, stems, segment_samples);
-        }
-    };
-
+    auto model = std::make_shared<std::unique_ptr<bt::BsRoformerModel>>();
     bt::SessionOptions options;
     options.cache_directory = args.cache;
-    options.run_segment = LazyModel{args.model};
+    options.separate_mix = [path = args.model, model](
+                               const bt::Audio& audio, const std::function<void(float)>& progress,
+                               const std::function<bool()>& cancelled) -> std::expected<bt::Stems, std::string> {
+        if (*model == nullptr) {
+            auto opened = bt::BsRoformerModel::open(path);
+            if (!opened) {
+                return std::unexpected(opened.error());
+            }
+            *model = std::make_unique<bt::BsRoformerModel>(std::move(*opened));
+        }
+        return (*model)->separate(audio, progress, cancelled);
+    };
     auto created = bt::Session::create(std::move(options));
     if (!created) {
         std::cerr << created.error() << '\n';
@@ -230,13 +225,14 @@ int main(int argc, char** argv) {
     std::cout << "input " << audio->frames << " frames, " << audio->channels << " ch, "
               << audio->sample_rate << " Hz\n";
 
-    auto model = bt::OnnxSegmentModel::open(args->model);
+    auto model = bt::BsRoformerModel::open(args->model);
     if (!model) {
         std::cerr << model.error() << '\n';
         return 1;
     }
+    std::cout << "chunk " << model->chunk_samples() << " samples\n";
 
-    auto stems = bt::separate_audio(*audio, model->runner(), {}, [](float fraction) {
+    auto stems = model->separate(*audio, [](float fraction) {
         std::cout << '\r' << static_cast<int>(fraction * 1000.f) / 10.f << '%' << std::flush;
     });
     std::cout << '\n';

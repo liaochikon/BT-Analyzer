@@ -12,7 +12,7 @@ The current version has been rewritten with C++, ONNX Runtime, and Dear ImGui. O
 
 ## Features
 
-- **AI stem separation**: After import, a song can be split into six stems (drums, bass, other, vocals, guitar, piano)
+- **AI stem separation**: After import, BS-RoFormer SW splits a song into six stems (drums, bass, other, vocals, guitar, piano). Place the weights in `models` yourself; release zips do not include them.
 - **Mixer**: Adjust gain, pan, mute, and solo per stem in real time
 - **Practice player**: Variable speed, A-B loop, and count-in
 - **Automatic beats**: The metronome can estimate the song’s beat and follow a floating BPM
@@ -87,16 +87,16 @@ The waveform below works as a scrubber: left-drag to seek, right-click to set th
 
 ## Build
 
-You need Windows 10/11 (64-bit), Visual Studio 2022 (MSVC), and CMake. Model export also needs Python 3.10+.
+You need Windows 10/11 (64-bit), Visual Studio 2022 (MSVC), and CMake. The transcription model also needs Python 3.10+.
+
+Place a BS-RoFormer SW ONNX file at `models/bs_roformer_sw.onnx` (`bs_roformer_sw_6stem_fp32.onnx` or `bs_roformer_sw_6stem_fp16.onnx` also work). The file is gitignored, and the `build.bat` zip does not include it. Inputs are `spec_real` and `spec_imag`, shape `[1, 2, 1025, T]`. Outputs are `out_spec_real` and `out_spec_imag`, shape `[1, 6, 2, 1025, T]`, with `T` fixed. The chunk length is `(T - 1) × 512`. The UVR setting of 588800 samples is `T = 1151`. A 4-second export with `T = 345` also loads, with a coarser separation.
 
 ```bat
 python tools/fetch_nmp_onnx.py
-python -m pip install "demucs-onnx[export]==0.3.4" "onnxruntime>=1.20" soundfile
-python -m htdemucs6s_onnx export models/htdemucs_6s.onnx
 build.bat
 ```
 
-Output: `dist\BT-Analyzer-<version>-win64.zip`. The version number is in `VERSION`.
+Output: `dist\BT-Analyzer-<version>-win64.zip`. The version number is in `VERSION`. The zip includes the transcription model and omits the separation weights.
 
 ## License
 

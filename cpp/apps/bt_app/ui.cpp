@@ -1509,8 +1509,7 @@ void sync_projects(App& app, const bt::SongSnapshot& song, double length) {
                     next.push_back(std::move(item));
                 }
             };
-            append_projects(app.saves_directory, "");
-            append_projects(app.cache_directory / bt::kModelKey, "");
+            append_projects(app.saves_directory, bt::kModelKey);
         } catch (const std::exception&) {
             next = app.projects;
         }
@@ -1655,7 +1654,8 @@ void draw_projects(App& app, const bt::SongSnapshot& song, double length, float 
         }
         ImGui::SetNextItemWidth(120.f * scale);
         if (ImGui::SliderInt(
-                app.language == 2 ? "Demucs threads" : "Demucs 執行緒", &app.demucs_threads, 1, 16)) {
+                app.language == 2 ? "Separation threads" : app.language == 1 ? "分轨线程" : "分軌執行緒",
+                &app.demucs_threads, 1, 16)) {
             app.demucs_threads = std::clamp(app.demucs_threads, 1, 16);
             save_performance(app);
         }

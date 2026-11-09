@@ -38,15 +38,20 @@ struct SongSnapshot {
     std::array<bool, kStemCount> solo{};
 };
 
+// Whole-file separator. Used by BS-RoFormer instead of the Demucs segment runner.
+using MixSeparator = std::function<std::expected<Stems, std::string>(
+    const Audio& audio, const std::function<void(float)>& progress, const std::function<bool()>& cancelled)>;
+
 struct SessionOptions {
     std::filesystem::path cache_directory;
     std::string model_key = std::string(kModelKey);
     SegmentRunner run_segment;
     SeparateConfig separate;
+    MixSeparator separate_mix;
 };
 
 // Owns the song. Callers post commands; the session thread is the only writer of song state.
-// Cancel takes effect before the next segment. A finished cache entry is
+// Cancel takes effect before the next chunk. A finished cache entry is
 // cache_directory / model_key / {name}_{sha256} / song.txt + wavs.
 // An empty model key stores projects directly in cache_directory.
 // The folder name is the sha256 when the display name cannot be encoded.

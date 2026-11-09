@@ -202,7 +202,7 @@ std::expected<std::unique_ptr<Session>, std::string> Session::create(SessionOpti
     if (!options.model_key.empty() && !valid_model_key(options.model_key)) {
         return std::unexpected("model key must be a single directory name");
     }
-    if (!options.run_segment) {
+    if (!options.run_segment && !options.separate_mix) {
         return std::unexpected("segment runner is empty");
     }
     std::error_code error;
@@ -603,19 +603,20 @@ void Session::run_open(const Command& command) {
     state_->mix = std::make_shared<const Audio>(std::move(*decoded));
     publish(blank(SongPhase::Separating, 0.f, false, {}));
 
-    auto separated = separate_audio(
-        *state_->mix, options_.run_segment, options_.separate,
-        [&](float fraction) {
-            drain_mixer();
-            if (state_->live_job.load() != command.job) {
-                return;
-            }
-            publish(blank(SongPhase::Separating, fraction, false, {}));
-        },
-        [&] {
-            drain_mixer();
-            return state_->live_job.load() != command.job;
-        });
+    auto on_progress = [&](float fraction) {
+        drain_mixer();
+        if (state_->live_job.load() != command.job) {
+            return;
+        }
+        publish(blank(SongPhase::Separating, fraction, false, {}));
+    };
+    auto on_cancel = [&] {
+        drain_mixer();
+        return state_->live_job.load() != command.job;
+    };
+    auto separated = options_.separate_mix
+        ? options_.separate_mix(*state_->mix, on_progress, on_cancel)
+        : separate_audio(*state_->mix, options_.run_segment, options_.separate, on_progress, on_cancel);
     if (!separated) {
         state_->stems.reset();
         if (separated.error() == kSeparationCancelled) {

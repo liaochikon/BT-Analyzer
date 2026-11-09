@@ -368,6 +368,7 @@ struct App {
     std::filesystem::path saves_directory;
     std::string device_note;
     std::string model_note;
+    int separation_chunk = 0;
     std::shared_ptr<const bt::Stems> loaded;
     std::shared_ptr<const bt::Audio> peaks_source;
     std::shared_ptr<const bt::Stems> peak_stems;

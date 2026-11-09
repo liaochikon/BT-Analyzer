@@ -477,7 +477,9 @@ void log_startup(const App& app) {
         log_message(LogLevel::Warn, app.device_note);
     }
     if (app.model_note.empty()) {
-        log_phrase(LogLevel::Info, app.language, "分離模型就緒", "分离模型就绪", "Separation model ready");
+        log_phrase(
+            LogLevel::Info, app.language, "分離模型就緒", "分离模型就绪", "Separation model ready",
+            app.separation_chunk > 0 ? " · " + std::to_string(app.separation_chunk) + " samples" : std::string{});
     } else {
         log_message(LogLevel::Warn, app.model_note);
     }

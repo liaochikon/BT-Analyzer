@@ -31,11 +31,13 @@ bt::Audio ramp(std::int64_t frames) {
 
 }  // namespace
 
-TEST_CASE("contract matches the static htdemucs_6s graph") {
+TEST_CASE("contract keeps the htdemucs segment size and the roformer project key") {
     REQUIRE(bt::kSegmentSamples == 343980);
+    REQUIRE(bt::kStemNames[0] == "drums");
+    REQUIRE(bt::kStemNames[1] == "bass");
     REQUIRE(bt::kStemNames[4] == "guitar");
     REQUIRE(bt::kStemNames[5] == "piano");
-    REQUIRE(bt::kModelKey == "htdemucs_6s");
+    REQUIRE(bt::kModelKey == "bs_roformer_sw");
 }
 
 TEST_CASE("pad segment borrows context and center trim recovers the chunk") {
