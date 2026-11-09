@@ -1,5 +1,7 @@
 #include "bt/project.hpp"
 
+#include "bt/contract.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -166,6 +168,8 @@ struct SongFile {
     std::string name;
     double seconds = 0;
     std::filesystem::path source;
+    std::string model;
+    std::string device;
     bool present = false;
 };
 
@@ -188,6 +192,15 @@ SongFile read_song_file(const std::filesystem::path& path) {
     file.present = true;
     file.name = one_line(strip_cr(name));
     file.source = path_from_utf8(strip_cr(source));
+    std::string extra;
+    while (std::getline(input, extra)) {
+        extra = strip_cr(extra);
+        if (extra.rfind("model=", 0) == 0) {
+            file.model = one_line(extra.substr(6));
+        } else if (extra.rfind("device=", 0) == 0) {
+            file.device = one_line(extra.substr(7));
+        }
+    }
     const std::string seconds_text = strip_cr(seconds);
     double value = 0;
     const auto parsed = std::from_chars(seconds_text.data(), seconds_text.data() + seconds_text.size(), value);
@@ -213,6 +226,10 @@ std::expected<void, std::string> write_song_file(const std::filesystem::path& di
     seconds.precision(12);
     seconds << entry.seconds;
     output << seconds.str() << '\n' << path_to_utf8(entry.source) << '\n';
+    if (!entry.model_key.empty() || !entry.device.empty()) {
+        output << "model=" << one_line(entry.model_key) << '\n';
+        output << "device=" << one_line(entry.device) << '\n';
+    }
     if (!output) {
         return std::unexpected("cannot write song.txt");
     }
@@ -227,6 +244,17 @@ ProjectEntry entry_from_directory(const std::filesystem::path& directory) {
     const SongFile file = read_song_file(directory / "song.txt");
     entry.seconds = file.seconds;
     entry.source = file.source;
+    entry.model_key = file.model;
+    entry.device = file.device;
+    if (entry.model_key.empty()) {
+        try {
+            const std::string parent = path_to_utf8(directory.parent_path().filename());
+            if (is_separation_key(parent)) {
+                entry.model_key = parent;
+            }
+        } catch (const std::exception&) {
+        }
+    }
     if (!file.name.empty()) {
         entry.name = file.name;
     } else if (filename.size() > entry.hash.size()) {
@@ -246,6 +274,22 @@ bool is_bare_hash_folder(const std::filesystem::path& directory) {
 }
 
 }  // namespace
+
+std::expected<ProjectEntry, std::string> read_project(const std::filesystem::path& directory) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(directory, error)) {
+        return std::unexpected("song folder is missing");
+    }
+    try {
+        ProjectEntry entry = entry_from_directory(directory);
+        if (!is_hex_hash(entry.hash)) {
+            return std::unexpected("song folder is missing");
+        }
+        return entry;
+    } catch (const std::exception&) {
+        return std::unexpected("song folder is missing");
+    }
+}
 
 std::string display_name_from_path(const std::filesystem::path& path) {
     std::string name = path_to_utf8(path.filename());
@@ -449,6 +493,12 @@ std::expected<ProjectEntry, std::string> commit_project(ProjectEntry entry) {
     }
     if (!existing.source.empty()) {
         entry.source = existing.source;
+    }
+    if (entry.model_key.empty()) {
+        entry.model_key = existing.model;
+    }
+    if (entry.device.empty()) {
+        entry.device = existing.device;
     }
     if (entry.name.empty()) {
         entry.name = "song";

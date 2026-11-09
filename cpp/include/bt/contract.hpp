@@ -16,7 +16,17 @@ inline constexpr std::array<std::string_view, kStemCount> kStemNames = {
 
 inline constexpr std::string_view kInputName = "mix";
 inline constexpr std::string_view kOutputName = "stems";
-// Project folders for this branch. Kept apart from htdemucs_6s caches.
-inline constexpr std::string_view kModelKey = "bs_roformer_sw";
+// Each key is one saves subdirectory. The same song can exist under more than one.
+inline constexpr std::array<std::string_view, 2> kSeparationKeys{"bs_roformer_sw", "htdemucs_6s"};
+inline constexpr std::string_view kModelKey = kSeparationKeys[0];
+
+inline constexpr bool is_separation_key(std::string_view key) {
+    for (const std::string_view known : kSeparationKeys) {
+        if (known == key) {
+            return true;
+        }
+    }
+    return false;
+}
 
 }  // namespace bt

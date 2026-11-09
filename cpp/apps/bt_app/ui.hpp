@@ -355,10 +355,13 @@ struct ProjectItem {
     std::string hash;
     std::filesystem::path directory;
     std::filesystem::path source;
+    std::string model_key;
+    std::string device;
 };
 
 class NoteService;
 class BeatService;
+class StemEngine;
 
 struct App {
     bt::Session* session = nullptr;
@@ -369,6 +372,10 @@ struct App {
     std::string device_note;
     std::string model_note;
     int separation_chunk = 0;
+    std::string separation_device;
+    std::string separation_model = std::string(bt::kModelKey);
+    int separation_preference = 0;
+    StemEngine* engine = nullptr;
     std::shared_ptr<const bt::Stems> loaded;
     std::shared_ptr<const bt::Audio> peaks_source;
     std::shared_ptr<const bt::Stems> peak_stems;
@@ -449,6 +456,7 @@ struct App {
     float widget_anchor = 0.f;
     std::vector<ProjectItem> projects;
     int project_index = -1;
+    bool settings_panel = false;
     bool projects_seeded = false;
     double projects_scanned = -1;
     std::uint64_t project_watch_job = 0;

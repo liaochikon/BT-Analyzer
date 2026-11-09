@@ -12,7 +12,7 @@ The current version has been rewritten with C++, ONNX Runtime, and Dear ImGui. O
 
 ## Features
 
-- **AI stem separation**: After import, BS-RoFormer SW splits a song into six stems (drums, bass, other, vocals, guitar, piano). Place the weights in `models` yourself; release zips do not include them.
+- **AI stem separation**: After import, BS-RoFormer SW splits a song into six stems (drums, bass, other, vocals, guitar, piano). Settings can change the stem model and the inference device (Auto, CPU, CUDA). HTDemucs 6s is available when `models/htdemucs_6s.onnx` is present. Release parts include the separation weights that were found.
 - **Mixer**: Adjust gain, pan, mute, and solo per stem in real time
 - **Practice player**: Variable speed, A-B loop, and count-in
 - **Automatic beats**: The metronome can estimate the song’s beat and follow a floating BPM
@@ -25,8 +25,8 @@ The current version has been rewritten with C++, ONNX Runtime, and Dear ImGui. O
 ### 0. Download
 
 1. Open the [Releases page](https://github.com/liaochikon/BT-Analyzer/releases).
-2. Find the latest release and, under Assets, download `BT-Analyzer-*-win64.zip` (do not download Source code).
-3. Extract the whole zip into a folder and open `bt-app.exe` inside it.
+2. Find the latest release and, under Assets, download every `BT-Analyzer-*-win64.7z.001`, `.002`, … part (do not download Source code).
+3. Put those files in one folder, open the `.001` file with 7-Zip, extract it, and open `bt-app.exe`. [7-Zip](https://www.7-zip.org/) is required.
 4. If Windows says “Windows protected your PC”, choose More info, then Run anyway.
 
 Keep the whole folder together; `bt-app.exe` needs the files next to it.
@@ -89,14 +89,21 @@ The waveform below works as a scrubber: left-drag to seek, right-click to set th
 
 You need Windows 10/11 (64-bit), Visual Studio 2022 (MSVC), and CMake. The transcription model also needs Python 3.10+.
 
-Place a BS-RoFormer SW ONNX file at `models/bs_roformer_sw.onnx` (`bs_roformer_sw_6stem_fp32.onnx` or `bs_roformer_sw_6stem_fp16.onnx` also work). The file is gitignored, and the `build.bat` zip does not include it. Inputs are `spec_real` and `spec_imag`, shape `[1, 2, 1025, T]`. Outputs are `out_spec_real` and `out_spec_imag`, shape `[1, 6, 2, 1025, T]`, with `T` fixed. The chunk length is `(T - 1) × 512`. The UVR setting of 588800 samples is `T = 1151`. A 4-second export with `T = 345` also loads, with a coarser separation.
+Place a BS-RoFormer SW ONNX file at `models/bs_roformer_sw.onnx` (`bs_roformer_sw_6stem_fp32.onnx` or `bs_roformer_sw_6stem_fp16.onnx` also work). The file is gitignored. `build.bat` includes it in the split archive. Inputs are `spec_real` and `spec_imag`, shape `[1, 2, 1025, T]`. Outputs are `out_spec_real` and `out_spec_imag`, shape `[1, 6, 2, 1025, T]`, with `T` fixed. The chunk length is `(T - 1) × 512`. The UVR setting of 588800 samples is `T = 1151`.
+
+If you already have the checkpoint and its yaml, export them locally. The command does not download weights:
+
+```bat
+python -m pip install -r requirements-bs-roformer-onnx.txt
+python -m bs_roformer_sw_onnx export models/bs_roformer_sw.onnx --checkpoint BS-Rofo-SW-Fixed.ckpt --config BS-Rofo-SW-Fixed.yaml
+```
 
 ```bat
 python tools/fetch_nmp_onnx.py
 build.bat
 ```
 
-Output: `dist\BT-Analyzer-<version>-win64.zip`. The version number is in `VERSION`. The zip includes the transcription model and omits the separation weights.
+Output is only the split archive: `dist\BT-Analyzer-<version>-win64.7z.001` and the following parts. Each part is `PART_SIZE_MB` from `build.bat` (200 MB by default); the last part can be smaller. The version number is in `VERSION`. Open the first part with 7-Zip to extract it. One set of parts contains the app, the transcription model, and the separation weights found under `models` at pack time (`bs_roformer_sw.onnx`, plus `bs_roformer_sw_fp16.onnx` and `htdemucs_6s.onnx` when those files exist). When `cpp\build\cuda-ep` exists, the CUDA runtime is in those same parts; otherwise that release runs separation on CPU.
 
 ## License
 

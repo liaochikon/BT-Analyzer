@@ -558,8 +558,10 @@ void Session::run_open(const Command& command) {
         return;
     }
 
+    const std::string model_key = options_.backend_key ? options_.backend_key() : options_.model_key;
+    const std::string device = options_.backend_device ? options_.backend_device() : std::string{};
     auto located = locate_project(
-        options_.cache_directory, options_.model_key, *digest, display_name_from_path(command.path), command.path);
+        options_.cache_directory, model_key, *digest, display_name_from_path(command.path), command.path);
     if (!located) {
         publish(blank(SongPhase::Failed, 0.f, false, located.error()));
         return;
@@ -631,6 +633,10 @@ void Session::run_open(const Command& command) {
         publish(blank(SongPhase::Failed, 1.f, false, stored.error()));
         return;
     }
+    located->model_key = model_key;
+    if (!device.empty()) {
+        located->device = device;
+    }
     if (auto committed = commit_project(*located)) {
         state_->cache_directory = committed->directory;
         state_->project_hash = committed->hash;
@@ -653,22 +659,16 @@ void Session::run_open_cache(const Command& command) {
         publish(blank(SongPhase::Cancelled, 0.f, false, {}));
         return;
     }
-    ProjectEntry entry;
-    for (ProjectEntry& project : list_projects(options_.cache_directory, options_.model_key)) {
-        if (project.directory == command.path) {
-            entry = std::move(project);
-            break;
-        }
-    }
-    if (entry.hash.empty()) {
-        publish(blank(SongPhase::Failed, 0.f, false, "song folder is missing"));
+    auto entry = read_project(command.path);
+    if (!entry) {
+        publish(blank(SongPhase::Failed, 0.f, false, entry.error()));
         return;
     }
-    state_->cache_directory = entry.directory;
-    state_->project_hash = entry.hash;
-    state_->project_name = entry.name;
-    state_->source = entry.source;
-    auto cached = load_cache(entry.directory);
+    state_->cache_directory = entry->directory;
+    state_->project_hash = entry->hash;
+    state_->project_name = entry->name;
+    state_->source = entry->source;
+    auto cached = load_cache(entry->directory);
     if (!cached || !*cached) {
         publish(blank(SongPhase::Failed, 0.f, false, cached ? std::string("cached song is incomplete") : cached.error()));
         return;

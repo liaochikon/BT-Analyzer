@@ -2,9 +2,9 @@
 
 #include "bt/basic_pitch.hpp"
 #include "bt/project.hpp"
-#include "bt/roformer.hpp"
 #include "notes.hpp"
 #include "beats.hpp"
+#include "separate.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -282,18 +282,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
 
     const auto exe_dir = executable_directory();
     const auto cwd = std::filesystem::current_path();
-    const char* roformer_names[] = {
-        "models/bs_roformer_sw.onnx",
-        "models/bs_roformer_sw_6stem_fp32.onnx",
-        "models/bs_roformer_sw_6stem_fp16.onnx",
-    };
-    std::filesystem::path model_path;
-    for (const char* name : roformer_names) {
-        model_path = locate_asset(exe_dir, cwd, name);
-        if (!model_path.empty()) {
-            break;
-        }
-    }
     const auto font_path = locate_asset(exe_dir, cwd, "fonts/sarasa-gothic-tc-nerd-merged.ttf");
 
     const auto cache_directory = exe_dir / "cache";
@@ -303,22 +291,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     btapp::load_performance(boot);
     const int demucs_threads = boot.demucs_threads;
     const int note_workers = boot.note_workers;
+    const std::string separation_model = boot.separation_model;
+    const int separation_preference = boot.separation_preference;
 
     // Full graph optimization fails once the swap chain has reserved address space.
-    auto model_slot = std::make_shared<std::unique_ptr<bt::BsRoformerModel>>();
-    std::string model_error;
-    int separation_chunk = 0;
-    if (model_path.empty()) {
-        model_error = "找不到 models/bs_roformer_sw.onnx。這份版本不附分軌權重。";
-    } else {
-        auto opened = bt::BsRoformerModel::open(model_path, demucs_threads);
-        if (!opened) {
-            model_error = opened.error();
-        } else {
-            separation_chunk = opened->chunk_samples();
-            *model_slot = std::make_unique<bt::BsRoformerModel>(std::move(*opened));
-        }
-    }
+    auto engine = std::make_unique<btapp::StemEngine>();
+    engine->discover(exe_dir, cwd);
+    const auto preference = separation_preference == 1
+        ? btapp::InferenceDevice::Cpu
+        : separation_preference == 2 ? btapp::InferenceDevice::Cuda : btapp::InferenceDevice::Auto;
+    engine->apply(separation_model, preference, demucs_threads);
+    const std::string model_error = engine->error();
+    const int separation_chunk = engine->chunk();
+    const std::string separation_device = engine->device();
     const auto pitch_path = locate_asset(exe_dir, cwd, "models/nmp.onnx");
     std::string pitch_error;
     std::unique_ptr<btapp::NoteService> note_service;
@@ -375,23 +360,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
 
     bt::SessionOptions options;
     options.cache_directory = saves_directory;
-    options.separate_mix = [model_path, model_slot, model_error, demucs_threads](
+    options.model_key = engine->model_key();
+    options.backend_key = [eng = engine.get()] { return eng->model_key(); };
+    options.backend_device = [eng = engine.get()] { return eng->device(); };
+    options.separate_mix = [eng = engine.get()](
                                const bt::Audio& audio, const std::function<void(float)>& progress,
                                const std::function<bool()>& cancelled) -> std::expected<bt::Stems, std::string> {
-        if (*model_slot == nullptr) {
-            if (!model_error.empty()) {
-                return std::unexpected(model_error);
-            }
-            if (model_path.empty()) {
-                return std::unexpected("找不到 models/bs_roformer_sw.onnx。這份版本不附分軌權重。");
-            }
-            auto opened = bt::BsRoformerModel::open(model_path, demucs_threads);
-            if (!opened) {
-                return std::unexpected(opened.error());
-            }
-            *model_slot = std::make_unique<bt::BsRoformerModel>(std::move(*opened));
-        }
-        return (*model_slot)->separate(audio, progress, cancelled);
+        return eng->separate(audio, progress, cancelled);
     };
     auto session_created = bt::Session::create(std::move(options));
     if (!session_created) {
@@ -446,10 +421,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     app.saves_directory = saves_directory;
     app.note_workers = note_workers;
     app.demucs_threads = demucs_threads;
+    app.separation_model = engine->model_key();
+    app.separation_preference = separation_preference;
+    app.engine = engine.get();
     app.device_note = player.device_error();
     btapp::load_output(app);
     app.model_note = model_error;
     app.separation_chunk = separation_chunk;
+    app.separation_device = separation_device;
     app.pitch_note = pitch_error;
     app.pitch_ready = pitch_ready;
     if (!pitch_path.empty()) {

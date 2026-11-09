@@ -15,6 +15,7 @@ enum class Action : int {
     SeekBack,
     SeekForward,
     Loop,
+    ClearLoop,
     Metro,
     CountIn,
     Snap,
@@ -44,6 +45,7 @@ struct KeyChord {
 
 struct Keymap {
     std::array<KeyChord, static_cast<std::size_t>(Action::Count)> bindings{};
+    std::array<KeyChord, static_cast<std::size_t>(Action::Count)> alternate{};
 };
 
 const char* action_label(Action action, int language);

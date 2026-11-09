@@ -4,6 +4,7 @@ cd /d "%~dp0"
 
 set "CONFIG=Release"
 set "DEV_TOOLS=OFF"
+set "PART_SIZE_MB=200"
 if "%~1"=="" goto :configured
 if /I "%~1"=="Release" goto :configured
 if /I "%~1"=="Debug" (
@@ -13,7 +14,9 @@ if /I "%~1"=="Debug" (
 )
 
 echo 用法：build.bat [Release^|Debug]
-echo Release 編譯玩音樂用的程式，並打成 dist 裡的壓縮檔。
+echo Release 編譯可攜式程式，並打成 dist 裡每份 %PART_SIZE_MB% MB 的 7z 分割檔。
+echo 只留下 .7z.001、.7z.002……。用 7-Zip 開啟第一份即可解壓。
+echo 內容含程式、轉譜模型、找得到的分軌權重；有 cpp\build\cuda-ep 時含 CUDA。
 echo Debug 另外編譯命令列工具和測試，不打包。
 set "EXITCODE=1"
 goto :finish
@@ -43,7 +46,7 @@ if /I not "%CONFIG%"=="Release" (
   goto :finish
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0packaging\pack-release.ps1" -RepoRoot "%~dp0."
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0packaging\pack-release.ps1" -RepoRoot "%~dp0." -PartSizeMB %PART_SIZE_MB%
 if errorlevel 1 goto :fail
 goto :finish
 

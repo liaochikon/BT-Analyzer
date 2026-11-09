@@ -6,7 +6,16 @@
 #include <cmath>
 #include <cstring>
 #include <numbers>
+#include <string>
 #include <utility>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 namespace bt {
 namespace {
@@ -426,6 +435,7 @@ struct BsRoformerModel::Impl {
     std::string out_imag = "out_spec_imag";
     int time_frames = 0;
     int chunk_samples = 0;
+    std::string device = "CPU";
 
     ~Impl() {
         if (api == nullptr) {
@@ -456,15 +466,65 @@ int BsRoformerModel::chunk_samples() const {
     return impl_->chunk_samples;
 }
 
+const std::string& BsRoformerModel::device() const {
+    return impl_->device;
+}
+
+std::filesystem::path executable_directory() {
+    wchar_t buffer[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+        return {};
+    }
+    return std::filesystem::path(buffer).parent_path();
+}
+
+std::string attach_cuda(const OrtApi* api, OrtEnv* env, OrtSessionOptions* options) {
+    const auto directory = executable_directory();
+    const auto library = directory / "onnxruntime_providers_cuda.dll";
+    if (directory.empty() || !std::filesystem::exists(library)) {
+        return "找不到 onnxruntime_providers_cuda.dll";
+    }
+    // The CUDA library is process-wide. A later session's register call returns
+    // "already registered", but that env can still see and append the device.
+    SetDllDirectoryW(directory.c_str());
+    const std::string registered = status_message(
+        api, api->RegisterExecutionProviderLibrary(env, "cuda", library.c_str()));
+    SetDllDirectoryW(nullptr);
+    const OrtEpDevice* const* devices = nullptr;
+    size_t count = 0;
+    const std::string listed = status_message(api, api->GetEpDevices(env, &devices, &count));
+    if (!listed.empty() || devices == nullptr) {
+        if (!registered.empty()) {
+            return registered;
+        }
+        return listed.empty() ? "CUDA execution provider is unavailable" : listed;
+    }
+    const OrtEpDevice* chosen = nullptr;
+    for (size_t index = 0; index < count; ++index) {
+        const char* name = api->EpDevice_EpName(devices[index]);
+        if (name != nullptr && std::string(name).find("CUDA") != std::string::npos) {
+            chosen = devices[index];
+            break;
+        }
+    }
+    if (chosen == nullptr) {
+        return registered.empty() ? "CUDA execution provider is unavailable" : registered;
+    }
+    const OrtEpDevice* selected[] = {chosen};
+    return status_message(
+        api, api->SessionOptionsAppendExecutionProvider_V2(options, env, selected, 1, nullptr, nullptr, 0));
+}
+
 std::expected<BsRoformerModel, std::string> BsRoformerModel::open(
-    const std::filesystem::path& model_path, int intra_op_threads) {
+    const std::filesystem::path& model_path, int intra_op_threads, bool require_cuda) {
     const OrtApi* api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
     if (api == nullptr) {
         return std::unexpected("ONNX Runtime API is unavailable");
     }
     const std::wstring path = model_path.wstring();
-    auto attempt = [&](GraphOptimizationLevel level, bool memory_pattern,
-                       int threads) -> std::expected<BsRoformerModel, std::string> {
+    auto attempt = [&](GraphOptimizationLevel level, bool memory_pattern, int threads,
+                       bool cuda) -> std::expected<BsRoformerModel, std::string> {
         auto impl = std::make_unique<Impl>();
         impl->api = api;
         if (auto message = status_message(api, api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "bt-roformer", &impl->env));
@@ -491,6 +551,12 @@ std::expected<BsRoformerModel, std::string> BsRoformerModel::open(
                 !message.empty()) {
                 return std::unexpected(message);
             }
+        }
+        if (cuda) {
+            if (auto message = attach_cuda(api, impl->env, impl->options); !message.empty()) {
+                return std::unexpected(message);
+            }
+            impl->device = "CUDA";
         }
         if (auto message = status_message(api, api->CreateSession(impl->env, path.c_str(), impl->options, &impl->session));
             !message.empty()) {
@@ -586,12 +652,35 @@ std::expected<BsRoformerModel, std::string> BsRoformerModel::open(
     };
 
     const int preferred = intra_op_threads > 0 ? intra_op_threads : 0;
-    auto opened = attempt(ORT_ENABLE_ALL, true, preferred);
-    if (opened || opened.error().find("bad allocation") == std::string::npos) {
+    auto opened = attempt(ORT_ENABLE_ALL, true, preferred, require_cuda);
+    if (!opened && require_cuda) {
         return opened;
     }
-    const int fallback = preferred > 0 ? preferred : 4;
-    return attempt(ORT_ENABLE_BASIC, false, fallback);
+    if (!opened && opened.error().find("bad allocation") != std::string::npos) {
+        const int fallback = preferred > 0 ? preferred : 4;
+        opened = attempt(ORT_ENABLE_BASIC, false, fallback, false);
+    }
+    if (opened || require_cuda) {
+        return opened;
+    }
+    return attempt(ORT_ENABLE_ALL, true, preferred, false);
+}
+
+std::expected<BsRoformerModel, std::string> BsRoformerModel::open_fastest(
+    const std::filesystem::path& fp16_path, const std::filesystem::path& fp32_path, int intra_op_threads) {
+    if (!fp16_path.empty()) {
+        auto gpu = open(fp16_path, intra_op_threads, true);
+        if (gpu) {
+            return gpu;
+        }
+    }
+    if (!fp32_path.empty()) {
+        return open(fp32_path, intra_op_threads, false);
+    }
+    if (!fp16_path.empty()) {
+        return open(fp16_path, intra_op_threads, false);
+    }
+    return std::unexpected("找不到 models/bs_roformer_sw.onnx。這份版本不附分軌權重。");
 }
 
 std::expected<void, std::string> BsRoformerModel::run_chunk(const float* mix, float* stems) const {

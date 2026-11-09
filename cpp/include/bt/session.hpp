@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -45,6 +46,10 @@ using MixSeparator = std::function<std::expected<Stems, std::string>(
 struct SessionOptions {
     std::filesystem::path cache_directory;
     std::string model_key = std::string(kModelKey);
+    // Read at the start of each import. Empty falls back to model_key.
+    std::function<std::string()> backend_key;
+    // CPU or CUDA of the graph that will run. Empty writes no device line.
+    std::function<std::string()> backend_device;
     SegmentRunner run_segment;
     SeparateConfig separate;
     MixSeparator separate_mix;
@@ -53,6 +58,7 @@ struct SessionOptions {
 // Owns the song. Callers post commands; the session thread is the only writer of song state.
 // Cancel takes effect before the next chunk. A finished cache entry is
 // cache_directory / model_key / {name}_{sha256} / song.txt + wavs.
+// song.txt keeps the model key and, when known, the CPU or CUDA device that wrote the wavs.
 // An empty model key stores projects directly in cache_directory.
 // The folder name is the sha256 when the display name cannot be encoded.
 class Session {

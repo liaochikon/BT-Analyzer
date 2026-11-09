@@ -12,7 +12,7 @@ BT-Analyzer 是基於 Demucs 和 Basic Pitch 的轉譜工具，主要用來加�
 
 ## 特色
 
-- **AI 分軌**：匯入音樂後用 BS-RoFormer SW 拆成六軌（鼓、貝斯、其他、人聲、吉他、鋼琴）。權重自行放到 `models`，發行壓縮檔不附。
+- **AI 分軌**：匯入音樂後用 BS-RoFormer SW 拆成六軌（鼓、貝斯、其他、人聲、吉他、鋼琴）。設定可改分軌模型與推論裝置（自動、CPU、CUDA）。有 `models/htdemucs_6s.onnx` 時可改用 HTDemucs 6s。發行分割檔含找得到的分軌權重。
 - **混音控制**：即時調整各音軌音量、左右（pan）、靜音、獨奏
 - **多功能播放器**：支援變速播放、AB 循環、數四拍
 - **自動節拍**：節拍器可自動推算歌曲節拍，支援浮動 BPM
@@ -25,8 +25,8 @@ BT-Analyzer 是基於 Demucs 和 Basic Pitch 的轉譜工具，主要用來加�
 ### 0. 下載
 
 1. 打開 [Releases 頁面](https://github.com/liaochikon/BT-Analyzer/releases)。
-2. 找到最新一版，在 Assets 底下下載 `BT-Analyzer-*-win64.zip`（不要下載 Source code）。
-3. 把整個壓縮檔解壓成一個資料夾，打開裡面的 `bt-app.exe`。
+2. 找到最新一版，在 Assets 底下下載全部 `BT-Analyzer-*-win64.7z.001`、`.002`…（不要下載 Source code）。
+3. 這些檔放在同一個資料夾，用 7-Zip 開啟 `.001` 並解壓，打開裡面的 `bt-app.exe`。需要 [7-Zip](https://www.7-zip.org/)。
 4. 若 Windows 顯示「已保護你的電腦」，選「其他資訊」，再選「仍要執行」。
 
 請整份資料夾一起保留；`bt-app.exe` 要靠旁邊的檔案才能開。
@@ -89,14 +89,21 @@ BT-Analyzer 是基於 Demucs 和 Basic Pitch 的轉譜工具，主要用來加�
 
 需要 Windows 10/11（64 位元）、Visual Studio 2022（MSVC）、CMake。轉譜模型另需 Python 3.10+。
 
-把 BS-RoFormer SW 的 ONNX 放到 `models/bs_roformer_sw.onnx`（`bs_roformer_sw_6stem_fp32.onnx` 或 `bs_roformer_sw_6stem_fp16.onnx` 也可以）。這個檔已在 `.gitignore`，`build.bat` 的壓縮檔不會帶它。圖的輸入是 `spec_real`、`spec_imag`，形狀 `[1, 2, 1025, T]`；輸出是 `out_spec_real`、`out_spec_imag`，形狀 `[1, 6, 2, 1025, T]`，`T` 必須固定。切塊長度是 `(T - 1) × 512`。和 UVR 同一套 588800 樣本切塊時，`T` 是 1151。`T = 345` 的 4 秒匯出也能載入，分離會比較粗。
+把 BS-RoFormer SW 的 ONNX 放到 `models/bs_roformer_sw.onnx`（`bs_roformer_sw_6stem_fp32.onnx` 或 `bs_roformer_sw_6stem_fp16.onnx` 也可以）。這個檔已在 `.gitignore`。`build.bat` 打分割檔時會把它放進去。圖的輸入是 `spec_real`、`spec_imag`，形狀 `[1, 2, 1025, T]`；輸出是 `out_spec_real`、`out_spec_imag`，形狀 `[1, 6, 2, 1025, T]`，`T` 必須固定。切塊長度是 `(T - 1) × 512`。和 UVR 同一套 588800 樣本切塊時，`T` 是 1151。
+
+本機已有 checkpoint 和對應的 yaml 時，用這支匯出，它不會下載權重：
+
+```bat
+python -m pip install -r requirements-bs-roformer-onnx.txt
+python -m bs_roformer_sw_onnx export models/bs_roformer_sw.onnx --checkpoint BS-Rofo-SW-Fixed.ckpt --config BS-Rofo-SW-Fixed.yaml
+```
 
 ```bat
 python tools/fetch_nmp_onnx.py
 build.bat
 ```
 
-產出：`dist\BT-Analyzer-<版本>-win64.zip`。版本號在 `VERSION`。壓縮檔含轉譜模型，不含分軌權重。
+產出只有分割檔：`dist\BT-Analyzer-<版本>-win64.7z.001` 起，每份 `build.bat` 的 `PART_SIZE_MB`（預設 200 MB），最後一份可能較小。版本號在 `VERSION`。用 7-Zip 開啟第一份即可解壓。內容是同一組檔案：程式、轉譜模型，以及打包時 `models` 裡找得到的分軌權重（`bs_roformer_sw.onnx`、若有則含 `bs_roformer_sw_fp16.onnx` 和 `htdemucs_6s.onnx`）。`cpp\build\cuda-ep` 存在時，CUDA 執行階段也在這組分割檔裡；沒有則這份 release 只用 CPU。
 
 ## 授權
 

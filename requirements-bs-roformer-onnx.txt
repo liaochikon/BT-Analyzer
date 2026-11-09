@@ -1,0 +1,12 @@
+# Export a local BS-RoFormer SW checkpoint. This does not download weights.
+#   python -m pip install -r requirements-bs-roformer-onnx.txt
+#   python -m bs_roformer_sw_onnx export models/bs_roformer_sw.onnx --checkpoint BS-Rofo-SW-Fixed.ckpt --config BS-Rofo-SW-Fixed.yaml
+
+torch>=2.4
+onnx>=1.17
+onnxconverter-common>=1.14
+einops>=0.8
+rotary-embedding-torch>=0.8
+beartype>=0.18
+pyyaml>=6
+packaging>=24

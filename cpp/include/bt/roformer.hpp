@@ -46,8 +46,14 @@ std::vector<float> roformer_stft_roundtrip(const float* samples, int frames);
 
 class BsRoformerModel {
 public:
+    // `require_cuda` keeps a CPU session from standing in for a missing GPU.
+    // fp16 compute is slower on this CPU, so the app only keeps that graph when CUDA attaches.
     static std::expected<BsRoformerModel, std::string> open(
-        const std::filesystem::path& model_path, int intra_op_threads = 0);
+        const std::filesystem::path& model_path, int intra_op_threads = 0, bool require_cuda = false);
+
+    // Prefer the fp16 graph on CUDA. Without CUDA, use the fp32 graph.
+    static std::expected<BsRoformerModel, std::string> open_fastest(
+        const std::filesystem::path& fp16_path, const std::filesystem::path& fp32_path, int intra_op_threads = 0);
 
     BsRoformerModel(BsRoformerModel&&) noexcept;
     BsRoformerModel& operator=(BsRoformerModel&&) noexcept;
@@ -57,6 +63,7 @@ public:
     BsRoformerModel& operator=(const BsRoformerModel&) = delete;
 
     int chunk_samples() const;
+    const std::string& device() const;
 
     std::expected<void, std::string> run_chunk(const float* mix, float* stems) const;
 

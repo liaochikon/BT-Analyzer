@@ -2,6 +2,8 @@
 
 #include "ui.hpp"
 
+#include "separate.hpp"
+
 #include "bt/contract.hpp"
 
 #include <algorithm>
@@ -479,7 +481,16 @@ void log_startup(const App& app) {
     if (app.model_note.empty()) {
         log_phrase(
             LogLevel::Info, app.language, "分離模型就緒", "分离模型就绪", "Separation model ready",
-            app.separation_chunk > 0 ? " · " + std::to_string(app.separation_chunk) + " samples" : std::string{});
+            [&] {
+                std::string suffix = " · " + model_label(app.separation_model);
+                if (!app.separation_device.empty()) {
+                    suffix += " · " + app.separation_device;
+                }
+                if (app.separation_chunk > 0) {
+                    suffix += " · " + std::to_string(app.separation_chunk) + " samples";
+                }
+                return suffix;
+            }());
     } else {
         log_message(LogLevel::Warn, app.model_note);
     }

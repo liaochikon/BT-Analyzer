@@ -2,9 +2,17 @@ BT-Analyzer 的程式碼是 MIT，著作權 2026 Liaochikon，全文在 LICENSE.
 
 這個壓縮檔另外帶了這些東西，授權全文在 licenses：
 
-- 分軌權重不在這個壓縮檔裡。
-  BS-RoFormer SW 請自行放到 models/bs_roformer_sw.onnx。
-  這份權重沒有隨程式發佈，也不會被 build.bat 打進壓縮檔。
+- models/bs_roformer_sw.onnx
+  BS-RoFormer SW 分軌權重，打包時從專案的 models 目錄放進這個壓縮檔。
+  若當時有 models/bs_roformer_sw_fp16.onnx，一併附上，供 CUDA 使用。
+- models/htdemucs_6s.onnx
+  若打包時這個檔存在，會一併附上，作為 CPU 分軌後端。
+  沒有這個檔時，設定裡不會出現 HTDemucs 6s。
+
+- onnxruntime_providers_cuda.dll，以及同資料夾的 cublas、cudnn、cudart、nvrtc 等
+  是 NVIDIA CUDA、cuDNN、cuBLAS 執行階段。
+  只有打包機有 cpp/build/cuda-ep 時才會附上，依 NVIDIA 軟體授權條款轉散發，不是 MIT。
+  沒有這些 dll 時，程式仍可用 CPU 分軌。
 
 - models/nmp.onnx
   Spotify basic-pitch 0.4.0 的轉譜模型，Apache 2.0。

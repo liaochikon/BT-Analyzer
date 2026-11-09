@@ -1,9 +1,15 @@
 把歌曲拖進視窗，或按開啟。歌曲會拆成鼓、貝斯、其他、人聲、吉他、鋼琴。
-拆過的歌會留在 saves\bs_roformer_sw，下次直接開，不用重拆。
+拆過的歌留在 saves 裡該模型的資料夾，下次直接開，不用重拆。
+同一首歌用兩個模型各拆一次，專案列表會各有一列。
 
-這份壓縮檔不含分軌權重。請自行準備 BS-RoFormer SW 的 ONNX，
-命名為 models\bs_roformer_sw.onnx，放在 bt-app.exe 旁邊。
-沒有這個檔時程式開得起來，但無法拆歌。
+設定裡可以選分軌模型和推論裝置。推論裝置有自動、CPU、CUDA。
+CUDA 需要這個資料夾裡有 onnxruntime_providers_cuda.dll。沒有的話請用 CPU。
+專案列表第二行是這首歌當初用的模型和裝置。
+
+分軌權重在 models，已經跟 bt-app.exe 放在一起。
+BS-RoFormer SW 是 models\bs_roformer_sw.onnx，CUDA 另外用 models\bs_roformer_sw_fp16.onnx。
+有 models\htdemucs_6s.onnx 時，設定裡可以改用 HTDemucs 6s，這個模型只走 CPU。
+沒有權重時程式開得起來，但無法拆歌。
 
 各軌可以靜音、獨奏、調音量和左右。可以慢放、圈一段反覆練、進段之前數四拍。
 拍點抓到之後，節拍器會跟著這首歌走。

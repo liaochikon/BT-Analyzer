@@ -140,10 +140,17 @@ target_link_libraries(bt_stem PRIVATE bcrypt)
 
 set(BT_REPO_ROOT ${CMAKE_SOURCE_DIR}/..)
 
+set(BT_CUDA_EP ${CMAKE_BINARY_DIR}/cuda-ep)
+
 function(bt_copy_runtime target)
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ORT_DLL} $<TARGET_FILE_DIR:${target}>
     VERBATIM)
+  if(EXISTS ${BT_CUDA_EP})
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${BT_CUDA_EP} $<TARGET_FILE_DIR:${target}>
+      VERBATIM)
+  endif()
   get_target_property(soxr_type soxr TYPE)
   if(soxr_type STREQUAL "SHARED_LIBRARY")
     add_custom_command(TARGET ${target} POST_BUILD
@@ -187,6 +194,7 @@ configure_file(
 add_executable(bt-app WIN32
   apps/bt_app/main.cpp
   apps/bt_app/ui.cpp
+  apps/bt_app/separate.cpp
   apps/bt_app/keys.cpp
   apps/bt_app/midi_view.cpp
   apps/bt_app/notes.cpp
@@ -213,6 +221,7 @@ if(BT_DEV_TOOLS)
     apps/bt_app/beats.cpp
     apps/bt_app/monitor.cpp
     apps/bt_app/ui.cpp
+    apps/bt_app/separate.cpp
     apps/bt_app/keys.cpp
     apps/bt_app/midi_view.cpp)
   target_include_directories(bt_stem_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/apps/bt_app)

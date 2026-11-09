@@ -17,6 +17,10 @@ struct ProjectEntry {
     double seconds = 0;
     std::filesystem::path directory;
     std::filesystem::path source;
+    // model_key is the saves subdirectory that produced the stems.
+    // device is CPU or CUDA when the file recorded it. Empty on older songs.
+    std::string model_key;
+    std::string device;
 };
 
 std::string display_name_from_path(const std::filesystem::path& path);
@@ -27,6 +31,9 @@ std::vector<ProjectEntry> list_projects(const std::filesystem::path& cache_root,
 
 // Moves project folders into saves_directory. A name that already exists there is left in place.
 void migrate_project_folders(const std::filesystem::path& from_directory, const std::filesystem::path& saves_directory);
+
+// Reads one project folder. The model is the parent directory when song.txt omits it.
+std::expected<ProjectEntry, std::string> read_project(const std::filesystem::path& directory);
 
 // Picks the existing folder for this hash, or the path a new folder will use.
 // Does not create the directory. An existing song.txt name is kept.

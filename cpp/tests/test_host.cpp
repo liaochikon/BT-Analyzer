@@ -38,6 +38,10 @@ TEST_CASE("contract keeps the htdemucs segment size and the roformer project key
     REQUIRE(bt::kStemNames[4] == "guitar");
     REQUIRE(bt::kStemNames[5] == "piano");
     REQUIRE(bt::kModelKey == "bs_roformer_sw");
+    REQUIRE(bt::kSeparationKeys.size() == 2);
+    REQUIRE(bt::kSeparationKeys[1] == "htdemucs_6s");
+    REQUIRE(bt::is_separation_key("bs_roformer_sw"));
+    REQUIRE_FALSE(bt::is_separation_key("saves"));
 }
 
 TEST_CASE("pad segment borrows context and center trim recovers the chunk") {

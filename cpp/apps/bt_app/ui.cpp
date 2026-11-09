@@ -5,6 +5,7 @@
 #include "midi_view.hpp"
 #include "monitor.hpp"
 #include "notes.hpp"
+#include "separate.hpp"
 
 #include "bt/project.hpp"
 
@@ -53,6 +54,10 @@ void save_performance(const App& app) {
     output << "note_workers=" << app.note_workers << '\n';
     output << "demucs_threads=" << app.demucs_threads << '\n';
     output << "seek_step=" << static_cast<int>(std::lround(app.seek_step)) << '\n';
+    const std::string model = app.separation_model.empty() ? std::string(bt::kModelKey) : app.separation_model;
+    const char* device = app.separation_preference == 1 ? "cpu" : app.separation_preference == 2 ? "cuda" : "auto";
+    output << "separation_model=" << model << '\n';
+    output << "separation_device=" << device << '\n';
 }
 
 void load_performance(App& app) {
@@ -67,13 +72,21 @@ void load_performance(App& app) {
             continue;
         }
         const std::string key = line.substr(0, eq);
-        const int value = std::atoi(line.c_str() + eq + 1);
+        std::string raw = line.substr(eq + 1);
+        if (!raw.empty() && raw.back() == '\r') {
+            raw.pop_back();
+        }
+        const int value = std::atoi(raw.c_str());
         if (key == "note_workers") {
             app.note_workers = std::clamp(value, 1, 8);
         } else if (key == "demucs_threads") {
             app.demucs_threads = std::clamp(value, 1, 16);
         } else if (key == "seek_step") {
             app.seek_step = static_cast<float>(std::clamp(value, 1, 20));
+        } else if (key == "separation_model" && bt::is_separation_key(raw)) {
+            app.separation_model = raw;
+        } else if (key == "separation_device") {
+            app.separation_preference = raw == "cpu" ? 1 : raw == "cuda" ? 2 : 0;
         }
     }
 }
@@ -138,6 +151,12 @@ const Phrase kProjects{{"專案"}, {"项目"}, {"Projects"}};
 const Phrase kImport{{"匯入"}, {"导入"}, {"Import"}};
 const Phrase kDelete{{"刪除"}, {"删除"}, {"Delete"}};
 const Phrase kRename{{"改名"}, {"改名"}, {"Rename"}};
+const Phrase kSeparation{{"分軌"}, {"分轨"}, {"Separation"}};
+const Phrase kSeparationModel{{"分軌模型"}, {"分轨模型"}, {"Stem model"}};
+const Phrase kInferenceDevice{{"推論裝置"}, {"推理设备"}, {"Inference device"}};
+const Phrase kDeviceAuto{{"自動"}, {"自动"}, {"Auto"}};
+const Phrase kDeviceCpu{{"CPU"}, {"CPU"}, {"CPU"}};
+const Phrase kDeviceCuda{{"CUDA"}, {"CUDA"}, {"CUDA"}};
 const Phrase kAudio{{"音訊"}, {"音频"}, {"Audio"}};
 const Phrase kOutput{{"輸出裝置"}, {"输出设备"}, {"Output"}};
 const Phrase kDeviceDefault{{"系統預設"}, {"系统默认"}, {"System default"}};
@@ -1459,16 +1478,55 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
     ImGui::PopStyleColor();
 }
 
+void apply_separation(App& app) {
+    if (app.engine == nullptr) {
+        return;
+    }
+    const auto device = app.separation_preference == 1
+        ? InferenceDevice::Cpu
+        : app.separation_preference == 2 ? InferenceDevice::Cuda : InferenceDevice::Auto;
+    app.engine->apply(app.separation_model, device, app.demucs_threads);
+    app.separation_model = app.engine->model_key();
+    app.separation_device = app.engine->device();
+    app.separation_chunk = app.engine->chunk();
+    app.model_note = app.engine->error();
+    save_performance(app);
+}
+
+std::string separation_caption(const ProjectItem& item) {
+    std::string label = model_label(item.model_key);
+    if (label.empty()) {
+        return item.device;
+    }
+    if (!item.device.empty()) {
+        label += " · ";
+        label += item.device;
+    }
+    return label;
+}
+
+void copy_project(ProjectItem& item, const bt::ProjectEntry& entry) {
+    item.name = entry.name;
+    item.seconds = entry.seconds;
+    item.hash = entry.hash;
+    item.directory = entry.directory;
+    item.source = entry.source;
+    item.model_key = entry.model_key;
+    item.device = entry.device;
+}
+
 void open_project(App& app, const ProjectItem& item) {
     if (app.session == nullptr) {
         return;
     }
     std::error_code error;
-    if (!item.source.empty() && std::filesystem::exists(item.source, error)) {
-        app.session->open_song(item.source);
+    if (std::filesystem::is_directory(item.directory, error)) {
+        app.session->open_cache(item.directory);
         return;
     }
-    app.session->open_cache(item.directory);
+    if (!item.source.empty() && std::filesystem::exists(item.source, error)) {
+        app.session->open_song(item.source);
+    }
 }
 
 void sync_projects(App& app, const bt::SongSnapshot& song, double length) {
@@ -1492,7 +1550,7 @@ void sync_projects(App& app, const bt::SongSnapshot& song, double length) {
                 for (const bt::ProjectEntry& entry : bt::list_projects(root, model_key)) {
                     bool seen = false;
                     for (const ProjectItem& item : next) {
-                        if (item.hash == entry.hash) {
+                        if (item.directory == entry.directory) {
                             seen = true;
                             break;
                         }
@@ -1501,15 +1559,13 @@ void sync_projects(App& app, const bt::SongSnapshot& song, double length) {
                         continue;
                     }
                     ProjectItem item;
-                    item.name = entry.name;
-                    item.seconds = entry.seconds;
-                    item.hash = entry.hash;
-                    item.directory = entry.directory;
-                    item.source = entry.source;
+                    copy_project(item, entry);
                     next.push_back(std::move(item));
                 }
             };
-            append_projects(app.saves_directory, bt::kModelKey);
+            for (const std::string_view key : bt::kSeparationKeys) {
+                append_projects(app.saves_directory, key);
+            }
         } catch (const std::exception&) {
             next = app.projects;
         }
@@ -1522,7 +1578,14 @@ void sync_projects(App& app, const bt::SongSnapshot& song, double length) {
     const bool pending = song.phase == bt::SongPhase::Decoding || song.phase == bt::SongPhase::Separating;
     const bool live = (pending || song.phase == bt::SongPhase::Ready) && !song.project_hash.empty() && song.job != app.closed_job;
     int found = -1;
-    if (!song.project_hash.empty()) {
+    if (!song.cache_directory.empty()) {
+        for (int index = 0; index < static_cast<int>(next.size()); ++index) {
+            if (next[static_cast<std::size_t>(index)].directory == song.cache_directory) {
+                found = index;
+                break;
+            }
+        }
+    } else if (!song.project_hash.empty()) {
         for (int index = 0; index < static_cast<int>(next.size()); ++index) {
             if (next[static_cast<std::size_t>(index)].hash == song.project_hash) {
                 found = index;
@@ -1536,6 +1599,16 @@ void sync_projects(App& app, const bt::SongSnapshot& song, double length) {
         item.hash = song.project_hash;
         item.directory = song.cache_directory;
         item.source = song.source;
+        try {
+            const std::string parent = bt::display_name_from_path(song.cache_directory.parent_path());
+            if (bt::is_separation_key(parent)) {
+                item.model_key = parent;
+            }
+        } catch (const std::exception&) {
+        }
+        if (song.phase == bt::SongPhase::Separating || song.phase == bt::SongPhase::Decoding) {
+            item.device = app.separation_device;
+        }
         next.insert(next.begin(), std::move(item));
         found = 0;
     }
@@ -1575,107 +1648,190 @@ void sync_projects(App& app, const bt::SongSnapshot& song, double length) {
     }
 }
 
+void fill_item_width() {
+    ImGui::SetNextItemWidth(std::max(1.f, ImGui::GetContentRegionAvail().x));
+}
+
+void draw_settings_panel(App& app, bool busy, float height) {
+    const float scale = ui_scale();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.f * scale, 8.f * scale));
+    ImGui::BeginChild(
+        "side-settings", ImVec2(0.f, std::max(1.f, height)), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_None);
+    if (busy) {
+        ImGui::BeginDisabled();
+    }
+    ImGui::TextUnformatted(tr(kLanguage, app.language));
+    const char* languages[] = {"繁體中文", "简体中文", "English"};
+    fill_item_width();
+    if (ImGui::BeginCombo("##language", languages[app.language])) {
+        for (int index = 0; index < 3; ++index) {
+            if (ImGui::Selectable(languages[index], app.language == index)) {
+                app.language = index;
+                save_language(app);
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", tr(kAudio, app.language));
+    ImGui::TextUnformatted(tr(kOutput, app.language));
+    refresh_outputs(app);
+    const int shown = std::clamp(app.output_device, 0, static_cast<int>(app.outputs.size()) - 1);
+    fill_item_width();
+    if (ImGui::BeginCombo("##output", app.outputs[static_cast<std::size_t>(shown)].name.c_str())) {
+        for (int index = 0; index < static_cast<int>(app.outputs.size()); ++index) {
+            const OutputChoice& choice = app.outputs[static_cast<std::size_t>(index)];
+            const std::string label = choice.name + "##" + std::to_string(index);
+            if (ImGui::Selectable(label.c_str(), app.output_device == index)) {
+                if (choice.id == app.output_id || app.player == nullptr) {
+                    app.output_device = index;
+                    app.output_id = choice.id;
+                } else if (auto switched = app.player->use_device(choice.id); switched) {
+                    app.output_device = index;
+                    app.output_id = choice.id;
+                    app.device_note.clear();
+                    save_output(app);
+                } else {
+                    app.output_device = 0;
+                    app.output_id.clear();
+                    app.device_note = switched.error();
+                    save_output(app);
+                }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", app.language == 2 ? "Performance" : app.language == 1 ? "性能" : "效能");
+    ImGui::TextUnformatted(app.language == 2 ? "Note workers" : app.language == 1 ? "转谱并行" : "轉譜並行");
+    fill_item_width();
+    if (ImGui::SliderInt("##note-workers", &app.note_workers, 1, 8)) {
+        app.note_workers = std::clamp(app.note_workers, 1, 8);
+        if (app.note_service != nullptr) {
+            app.note_service->set_workers(app.note_workers);
+        }
+        save_performance(app);
+    }
+    const bool cpu_threads = app.separation_device != "CUDA";
+    if (!cpu_threads) {
+        ImGui::BeginDisabled();
+    }
+    ImGui::TextUnformatted(app.language == 2 ? "Separation threads" : app.language == 1 ? "分轨线程" : "分軌執行緒");
+    fill_item_width();
+    if (ImGui::SliderInt("##separation-threads", &app.demucs_threads, 1, 16)) {
+        app.demucs_threads = std::clamp(app.demucs_threads, 1, 16);
+        save_performance(app);
+    }
+    if (cpu_threads && ImGui::IsItemDeactivatedAfterEdit()) {
+        apply_separation(app);
+    }
+    if (!cpu_threads) {
+        ImGui::EndDisabled();
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", tr(kSeparation, app.language));
+    ImGui::TextUnformatted(tr(kSeparationModel, app.language));
+    const std::vector<BackendStatus> backends = app.engine == nullptr ? std::vector<BackendStatus>{} : app.engine->backends();
+    const std::string model_preview_owned = model_label(app.separation_model);
+    const char* model_preview = model_preview_owned.c_str();
+    fill_item_width();
+    if (ImGui::BeginCombo("##separation-model", model_preview)) {
+        for (const BackendStatus& backend : backends) {
+            if (!backend.available) {
+                ImGui::BeginDisabled();
+            }
+            const bool selected = backend.key == app.separation_model;
+            if (ImGui::Selectable(backend.label.c_str(), selected) && backend.available && !selected) {
+                app.separation_model = backend.key;
+                apply_separation(app);
+            }
+            if (!backend.available) {
+                ImGui::EndDisabled();
+            }
+        }
+        if (backends.empty()) {
+            ImGui::TextDisabled("%s", model_preview);
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::TextUnformatted(tr(kInferenceDevice, app.language));
+    const bool cuda_backend = app.separation_model != "htdemucs_6s";
+    const char* device_labels[] = {tr(kDeviceAuto, app.language), tr(kDeviceCpu, app.language), tr(kDeviceCuda, app.language)};
+    const int preference = std::clamp(app.separation_preference, 0, 2);
+    const char* device_preview = cuda_backend ? device_labels[preference] : device_labels[1];
+    if (!cuda_backend) {
+        ImGui::BeginDisabled();
+    }
+    fill_item_width();
+    if (ImGui::BeginCombo("##separation-device", device_preview)) {
+        for (int index = 0; index < 3; ++index) {
+            if (ImGui::Selectable(device_labels[index], preference == index) && preference != index) {
+                app.separation_preference = index;
+                apply_separation(app);
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (!cuda_backend) {
+        ImGui::EndDisabled();
+    }
+    if (!app.model_note.empty()) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
+        ImGui::TextWrapped("%s", app.model_note.c_str());
+        ImGui::PopTextWrapPos();
+    } else if (!app.separation_device.empty()) {
+        ImGui::TextDisabled("%s", app.separation_device.c_str());
+    }
+    ImGui::Spacing();
+    draw_keymap_settings(app);
+    ImGui::Spacing();
+    if (busy) {
+        ImGui::BeginDisabledOverrideReenable();
+    }
+    if (MediumButton("monitor", Icon::Monitor).engaged(app.monitor_open).tip(tr(kMonitor, app.language)).draw()) {
+        app.monitor_open = true;
+    }
+    if (busy) {
+        ImGui::EndDisabledOverrideReenable();
+        ImGui::EndDisabled();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+}
+
 void draw_projects(App& app, const bt::SongSnapshot& song, double length, float height) {
     const float scale = ui_scale();
     const bool busy = interface_locked(app);
     sync_projects(app, song, length);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.102f, 0.102f, 0.102f, 1.f));
     ImGui::BeginChild("projects", ImVec2(232.f * scale, height), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    if (busy) {
-        ImGui::BeginDisabled();
-    }
     const float head_h = 32.f * scale;
-    ImGui::SetCursorPos(ImVec2(12.f * scale, (head_h - ImGui::GetTextLineHeight()) * 0.5f));
-    ImGui::TextUnformatted(tr(kProjects, app.language));
-    const float btn_w = MediumButton::width();
-    const float btn_y = (head_h - MediumButton::height()) * 0.5f;
-    const float import_x = ImGui::GetWindowWidth() - btn_w - 8.f * scale;
-    const float settings_x = import_x - 4.f * scale - btn_w;
-    const bool settings_open = ImGui::IsPopupOpen("settings");
-    ImGui::SetCursorPos(ImVec2(settings_x, btn_y));
-    if (MediumButton("settings", Icon::Gear).engaged(settings_open).tip(tr(kSettings, app.language)).draw()) {
-        ImGui::OpenPopup("settings");
+    const float side = 8.f * scale;
+    const float gap = 4.f * scale;
+    const float import_w = MediumButton::width();
+    const float btn_h = MediumButton::height();
+    const float btn_y = (head_h - btn_h) * 0.5f;
+    const float switches = std::max(1.f, ImGui::GetWindowWidth() - side * 2.f - gap * 2.f - import_w);
+    const float switch_w = switches * 0.5f;
+    ImGui::SetCursorPos(ImVec2(side, btn_y));
+    const ImVec2 projects_origin = ImGui::GetCursorScreenPos();
+    ImGui::PushClipRect(projects_origin, ImVec2(projects_origin.x + switch_w, projects_origin.y + btn_h), true);
+    if (text_button("side-projects", tr(kProjects, app.language), !app.settings_panel, true, switch_w, btn_h, 6.f * scale) &&
+        app.settings_panel) {
+        app.settings_panel = false;
+        app.keymap_capture = -1;
     }
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.f * scale, 10.f * scale));
-    if (ImGui::BeginPopup("settings", ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
-        ImGui::TextUnformatted(tr(kSettings, app.language));
-        ImGui::Separator();
-        ImGui::TextUnformatted(tr(kLanguage, app.language));
-        const char* languages[] = {"繁體中文", "简体中文", "English"};
-        ImGui::SetNextItemWidth(140.f * scale);
-        if (ImGui::BeginCombo("##language", languages[app.language])) {
-            for (int index = 0; index < 3; ++index) {
-                if (ImGui::Selectable(languages[index], app.language == index)) {
-                    app.language = index;
-                    save_language(app);
-                }
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::Spacing();
-        ImGui::TextDisabled("%s", tr(kAudio, app.language));
-        ImGui::TextUnformatted(tr(kOutput, app.language));
-        refresh_outputs(app);
-        const int shown = std::clamp(app.output_device, 0, static_cast<int>(app.outputs.size()) - 1);
-        ImGui::SetNextItemWidth(280.f * scale);
-        if (ImGui::BeginCombo("##output", app.outputs[static_cast<std::size_t>(shown)].name.c_str())) {
-            for (int index = 0; index < static_cast<int>(app.outputs.size()); ++index) {
-                const OutputChoice& choice = app.outputs[static_cast<std::size_t>(index)];
-                const std::string label = choice.name + "##" + std::to_string(index);
-                if (ImGui::Selectable(label.c_str(), app.output_device == index)) {
-                    if (choice.id == app.output_id || app.player == nullptr) {
-                        app.output_device = index;
-                        app.output_id = choice.id;
-                    } else if (auto switched = app.player->use_device(choice.id); switched) {
-                        app.output_device = index;
-                        app.output_id = choice.id;
-                        app.device_note.clear();
-                        save_output(app);
-                    } else {
-                        app.output_device = 0;
-                        app.output_id.clear();
-                        app.device_note = switched.error();
-                        save_output(app);
-                    }
-                }
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::Spacing();
-        ImGui::TextDisabled("%s", app.language == 2 ? "Performance" : app.language == 1 ? "性能" : "效能");
-        ImGui::SetNextItemWidth(120.f * scale);
-        if (ImGui::SliderInt(
-                app.language == 2 ? "Note workers" : app.language == 1 ? "转谱并行" : "轉譜並行", &app.note_workers, 1, 8)) {
-            app.note_workers = std::clamp(app.note_workers, 1, 8);
-            if (app.note_service != nullptr) {
-                app.note_service->set_workers(app.note_workers);
-            }
-            save_performance(app);
-        }
-        ImGui::SetNextItemWidth(120.f * scale);
-        if (ImGui::SliderInt(
-                app.language == 2 ? "Separation threads" : app.language == 1 ? "分轨线程" : "分軌執行緒",
-                &app.demucs_threads, 1, 16)) {
-            app.demucs_threads = std::clamp(app.demucs_threads, 1, 16);
-            save_performance(app);
-        }
-        ImGui::Spacing();
-        draw_keymap_settings(app);
-        ImGui::Spacing();
-        if (busy) {
-            ImGui::BeginDisabledOverrideReenable();
-        }
-        if (MediumButton("monitor", Icon::Monitor).engaged(app.monitor_open).tip(tr(kMonitor, app.language)).draw()) {
-            app.monitor_open = true;
-        }
-        if (busy) {
-            ImGui::EndDisabledOverrideReenable();
-        }
-        ImGui::EndPopup();
+    ImGui::PopClipRect();
+    ImGui::SetCursorPos(ImVec2(side + switch_w + gap, btn_y));
+    const ImVec2 settings_origin = ImGui::GetCursorScreenPos();
+    ImGui::PushClipRect(settings_origin, ImVec2(settings_origin.x + switch_w, settings_origin.y + btn_h), true);
+    if (text_button("side-settings", tr(kSettings, app.language), app.settings_panel, true, switch_w, btn_h, 6.f * scale) &&
+        !app.settings_panel) {
+        app.settings_panel = true;
     }
-    ImGui::PopStyleVar();
-    ImGui::SetCursorPos(ImVec2(import_x, btn_y));
-    if (MediumButton("import", Icon::Import).tip(tr(kImport, app.language)).draw() && !busy) {
+    ImGui::PopClipRect();
+    ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth() - side - import_w, btn_y));
+    if (MediumButton("import", Icon::Import).enabled(!busy).tip(tr(kImport, app.language)).draw()) {
         if (auto path = pick_audio(app.hwnd)) {
             app.rename_index = -1;
             app.rename_arm = -1.f;
@@ -1683,11 +1839,20 @@ void draw_projects(App& app, const bt::SongSnapshot& song, double length, float 
         }
     }
     ImGui::SetCursorPos(ImVec2(0.f, head_h));
+    if (app.settings_panel) {
+        draw_settings_panel(app, busy, std::max(1.f, height - head_h));
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        return;
+    }
+    if (busy) {
+        ImGui::BeginDisabled();
+    }
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.102f, 0.102f, 0.102f, 1.f));
     ImGui::BeginChild("project-list", ImVec2(0, std::max(1.f, height - head_h)), ImGuiChildFlags_None, ImGuiWindowFlags_None);
     ImGui::SetCursorPos(ImVec2(6.f * scale, 6.f * scale));
     int remove = -1;
-    const float row_h = std::max(26.f * scale, MediumButton::height() + 6.f * scale);
+    const float text_h = ImGui::GetTextLineHeight();
     const float icon_w = MediumButton::width();
     const float icon_h = MediumButton::height();
     for (int index = 0; index < static_cast<int>(app.projects.size()); ++index) {
@@ -1697,6 +1862,10 @@ void draw_projects(App& app, const bt::SongSnapshot& song, double length, float 
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const bool open = index == app.project_index;
         const bool editing = app.rename_index == index;
+        const std::string method = separation_caption(item);
+        const float row_h = method.empty()
+            ? std::max(26.f * scale, MediumButton::height() + 6.f * scale)
+            : std::max(text_h * 2.f + 8.f * scale, MediumButton::height() + 6.f * scale);
         char clock[16];
         const char* duration = "—";
         if (item.seconds > 0) {
@@ -1717,7 +1886,8 @@ void draw_projects(App& app, const bt::SongSnapshot& song, double length, float 
         const bool row_off = item_locked();
         draw->AddRectFilled(origin, ImVec2(origin.x + row_w, origin.y + row_h), paint(open ? kHi : IM_COL32(36, 36, 36, 255), row_off));
         draw->AddRect(origin, ImVec2(origin.x + row_w, origin.y + row_h), paint(open ? kHi : IM_COL32(22, 22, 22, 255), row_off));
-        const float text_y = origin.y + (row_h - ImGui::GetTextLineHeight()) * 0.5f;
+        const float text_y = method.empty() ? origin.y + (row_h - text_h) * 0.5f : origin.y + 3.f * scale;
+        const float method_y = text_y + text_h;
         const ImU32 ink = paint(open ? kHiInk : kHi, row_off);
         const ImU32 dim = paint(open ? kHiInk : IM_COL32(141, 141, 141, 255), row_off);
         if (app.rename_index == index) {
@@ -1743,7 +1913,9 @@ void draw_projects(App& app, const bt::SongSnapshot& song, double length, float 
                         item.hash = renamed->hash;
                         item.seconds = renamed->seconds;
                         item.source = renamed->source;
-                        if (song.project_hash == item.hash && app.session != nullptr) {
+                        item.model_key = renamed->model_key;
+                        item.device = renamed->device;
+                        if (song.cache_directory == old_directory && app.session != nullptr) {
                             app.session->relocate_cache(item.directory, item.name);
                         }
                     }
@@ -1752,8 +1924,14 @@ void draw_projects(App& app, const bt::SongSnapshot& song, double length, float 
             ImGui::PopStyleColor(2);
         } else {
             const float name_r = duration_x - 6.f * scale;
-            draw->PushClipRect(ImVec2(origin.x + 8.f * scale, origin.y), ImVec2(name_r, origin.y + row_h), true);
+            const float name_bottom = method.empty() ? origin.y + row_h : method_y;
+            draw->PushClipRect(ImVec2(origin.x + 8.f * scale, origin.y), ImVec2(name_r, name_bottom), true);
             draw->AddText(ImVec2(origin.x + 8.f * scale, text_y), ink, item.name.c_str());
+            draw->PopClipRect();
+        }
+        if (!method.empty()) {
+            draw->PushClipRect(ImVec2(origin.x + 8.f * scale, method_y), ImVec2(pencil_x - 4.f * scale, origin.y + row_h), true);
+            draw->AddText(ImVec2(origin.x + 8.f * scale, method_y), dim, method.c_str());
             draw->PopClipRect();
         }
         draw->AddText(ImVec2(duration_x, text_y), dim, duration);
@@ -1780,7 +1958,7 @@ void draw_projects(App& app, const bt::SongSnapshot& song, double length, float 
     if (remove >= 0 && remove < static_cast<int>(app.projects.size())) {
         const ProjectItem removed = app.projects[static_cast<std::size_t>(remove)];
         if (bt::delete_project(removed.directory)) {
-            const bool playing = !song.project_hash.empty() && removed.hash == song.project_hash;
+            const bool playing = !song.cache_directory.empty() && removed.directory == song.cache_directory;
             if (app.rename_index == remove) {
                 app.rename_index = -1;
             } else if (app.rename_index > remove) {

@@ -136,7 +136,10 @@ int run_cached(const Args& args) {
                                const bt::Audio& audio, const std::function<void(float)>& progress,
                                const std::function<bool()>& cancelled) -> std::expected<bt::Stems, std::string> {
         if (*model == nullptr) {
-            auto opened = bt::BsRoformerModel::open(path);
+            auto opened = bt::BsRoformerModel::open(path, 0, true);
+            if (!opened) {
+                opened = bt::BsRoformerModel::open(path);
+            }
             if (!opened) {
                 return std::unexpected(opened.error());
             }
@@ -225,12 +228,15 @@ int main(int argc, char** argv) {
     std::cout << "input " << audio->frames << " frames, " << audio->channels << " ch, "
               << audio->sample_rate << " Hz\n";
 
-    auto model = bt::BsRoformerModel::open(args->model);
+    auto model = bt::BsRoformerModel::open(args->model, 0, true);
+    if (!model) {
+        model = bt::BsRoformerModel::open(args->model);
+    }
     if (!model) {
         std::cerr << model.error() << '\n';
         return 1;
     }
-    std::cout << "chunk " << model->chunk_samples() << " samples\n";
+    std::cout << "chunk " << model->chunk_samples() << " samples, " << model->device() << '\n';
 
     auto stems = model->separate(*audio, [](float fraction) {
         std::cout << '\r' << static_cast<int>(fraction * 1000.f) / 10.f << '%' << std::flush;

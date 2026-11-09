@@ -4,6 +4,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace {
@@ -120,6 +121,57 @@ TEST_CASE("an older display-name folder is still found by its sha256") {
     REQUIRE(committed->directory == legacy);
     REQUIRE(committed->name == "別的");
     REQUIRE(bt::list_projects(temp.path, "htdemucs_6s").size() == 1);
+}
+
+TEST_CASE("song.txt keeps the separation model and device") {
+    TempDir temp("bt-project-inference");
+    const std::string hash(64, 'f');
+    const auto dir = temp.path / "bs_roformer_sw" / hash;
+    std::filesystem::create_directories(dir);
+    bt::ProjectEntry entry;
+    entry.name = "歌";
+    entry.hash = hash;
+    entry.directory = dir;
+    entry.source = temp.path / "a.wav";
+    entry.seconds = 3;
+    entry.model_key = "bs_roformer_sw";
+    entry.device = "CUDA";
+    const auto committed = bt::commit_project(entry);
+    REQUIRE(committed.has_value());
+    REQUIRE(committed->model_key == "bs_roformer_sw");
+    REQUIRE(committed->device == "CUDA");
+
+    const auto listed = bt::list_projects(temp.path, "bs_roformer_sw");
+    REQUIRE(listed.size() == 1);
+    REQUIRE(listed[0].model_key == "bs_roformer_sw");
+    REQUIRE(listed[0].device == "CUDA");
+
+    const auto renamed = bt::rename_project(dir, "另一個");
+    REQUIRE(renamed.has_value());
+    REQUIRE(renamed->name == "另一個");
+    REQUIRE(renamed->model_key == "bs_roformer_sw");
+    REQUIRE(renamed->device == "CUDA");
+    REQUIRE(bt::write_project_seconds(dir, 4).has_value());
+    const auto again = bt::read_project(dir);
+    REQUIRE(again.has_value());
+    REQUIRE(again->name == "另一個");
+    REQUIRE(again->device == "CUDA");
+    REQUIRE_THAT(again->seconds, Catch::Matchers::WithinAbs(4.0, 1e-6));
+}
+
+TEST_CASE("a project without an inference line takes the model from its folder") {
+    TempDir temp("bt-project-infer-folder");
+    const std::string hash(64, '9');
+    const auto dir = temp.path / "htdemucs_6s" / hash;
+    std::filesystem::create_directories(dir);
+    std::ofstream output(dir / "song.txt", std::ios::binary);
+    output << "bt-song 1\n歌\n1.5\nC:/song.wav\n";
+    output.close();
+    const auto read = bt::read_project(dir);
+    REQUIRE(read.has_value());
+    REQUIRE(read->model_key == "htdemucs_6s");
+    REQUIRE(read->device.empty());
+    REQUIRE(read->name == "歌");
 }
 
 TEST_CASE("project folders move into saves and a named folder wins") {
