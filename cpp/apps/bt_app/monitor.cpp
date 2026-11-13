@@ -374,6 +374,14 @@ void draw_jobs(const App& app) {
             std::clamp(app.note_progress, 0.f, 1.f) * 100.f);
         ProgressBar("notes", app.note_progress).overlay(overlay).draw();
     }
+    if (app.player != nullptr && app.player->pitch_mask_building()) {
+        const float fraction = app.player->pitch_mask_progress();
+        char overlay[64];
+        std::snprintf(
+            overlay, sizeof overlay, "%s  %.0f%%", pick(language, "遮罩中", "遮罩中", "Masking"),
+            std::clamp(fraction, 0.f, 1.f) * 100.f);
+        ProgressBar("pitch-mask", fraction).overlay(overlay).draw();
+    }
     const char* beat = pick(language, "閒置", "闲置", "Idle");
     if (app.beat_pending) {
         beat = pick(language, "偵測中", "检测中", "Detecting");

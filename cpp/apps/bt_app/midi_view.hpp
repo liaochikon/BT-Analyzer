@@ -11,6 +11,7 @@ void draw_ab_loop(
     ImU32 wash, ImU32 line, ImU32 tag, ImU32 ink, ImU32 outline);
 void midi_note_name(int pitch, char* text, std::size_t size);
 void instrument_pitch_bounds(bool bass, int fret_count, int& low, int& high);
+void viewport_pitch_range(const App& app, int& lo, int& hi);
 void draw_midi_canvas(App& app, const bt::Player::Snapshot& transport, double length, bool ready, ImVec2 size);
 
 }  // namespace btapp

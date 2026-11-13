@@ -142,6 +142,8 @@ const Phrase kFrets{{"品格"}, {"品格"}, {"Frets"}};
 const Phrase kBright{{"亮度"}, {"亮度"}, {"Bright"}};
 const Phrase kPitchMin{{"最低音"}, {"最低音"}, {"Min pitch"}};
 const Phrase kPitchMax{{"最高音"}, {"最高音"}, {"Max pitch"}};
+const Phrase kPitchMask{{"音域遮罩"}, {"音域遮罩"}, {"Pitch mask"}};
+const Phrase kPitchMaskBuild{{"遮罩中"}, {"遮罩中"}, {"Masking"}};
 const Phrase kModeSuggest{{"建議把位"}, {"建议把位"}, {"Suggested"}};
 const Phrase kPrefer{{"偏好把位"}, {"偏好把位"}, {"Position"}};
 const Phrase kAllowOpen{{"空弦"}, {"空弦"}, {"Open"}};
@@ -1302,6 +1304,7 @@ void draw_fold_body(App& app, int kind, int stem) {
             flow_int_knob(range, app, "key-min", tr(kPitchMin, app.language), &app.key_min, 21, 108, 21, caption_note);
             flow_int_knob(range, app, "key-max", tr(kPitchMax, app.language), &app.key_max, 21, 108, 108, caption_note);
         }
+        flow_toggle(range, "pitch-mask", tr(kPitchMask, app.language), &app.pitch_mask);
         range.end();
         return;
     }
@@ -2484,6 +2487,43 @@ void draw(App& app) {
             app.seen_revision = song->revision;
         }
     }
+    {
+        int lo = 0;
+        int hi = 0;
+        viewport_pitch_range(app, lo, hi);
+        const int stem = std::clamp(app.selected, 0, bt::kStemCount - 1);
+        static bool sent_on = false;
+        static int sent_stem = -1;
+        static int sent_lo = 0;
+        static int sent_hi = 0;
+        static std::uint64_t sent_rev = 0;
+        // Harmonic rebuild is heavy; apply while idle so knobs don't recompute every frame.
+        if (!app.pitch_mask) {
+            if (sent_on) {
+                app.player->set_pitch_mask(false, stem, lo, hi, bt::Player::PitchMaskBackend::Harmonic);
+                sent_on = false;
+            }
+        } else if (!ImGui::IsAnyItemActive()) {
+            const std::uint64_t revision =
+                (app.note_song << 16) ^ (app.note_ticket[static_cast<std::size_t>(stem)] << 8) ^
+                static_cast<std::uint64_t>(app.notes[static_cast<std::size_t>(stem)].size());
+            if (!sent_on || sent_stem != stem || sent_lo != lo || sent_hi != hi || sent_rev != revision) {
+                auto notes = std::make_shared<std::vector<bt::PitchMaskNote>>();
+                notes->reserve(app.notes[static_cast<std::size_t>(stem)].size());
+                for (const MidiNote& note : app.notes[static_cast<std::size_t>(stem)]) {
+                    notes->push_back(bt::PitchMaskNote{note.pitch, note.start, note.end});
+                }
+                app.player->set_pitch_mask(
+                    true, stem, lo, hi, bt::Player::PitchMaskBackend::Harmonic, std::move(notes),
+                    revision);
+                sent_on = true;
+                sent_stem = stem;
+                sent_lo = lo;
+                sent_hi = hi;
+                sent_rev = revision;
+            }
+        }
+    }
     if (!ImGui::IsAnyItemActive()) {
         app.speed = transport.speed;
         app.master_db = transport.master_db;
@@ -2591,8 +2631,9 @@ void draw(App& app) {
     const float bar_w = limit - bar_x;
     const float bar_h = std::max(8.f * scale, top_h - 16.f * scale);
     const bool show_note = running_note >= 0;
-    if ((importing || show_note) && bar_w >= 48.f * scale) {
-        const int bars = (importing ? 1 : 0) + (show_note ? 1 : 0);
+    const bool show_mask = app.player != nullptr && app.player->pitch_mask_building();
+    if ((importing || show_note || show_mask) && bar_w >= 48.f * scale) {
+        const int bars = (importing ? 1 : 0) + (show_note ? 1 : 0) + (show_mask ? 1 : 0);
         const float gap = 6.f * scale;
         const float each = (bar_w - gap * static_cast<float>(bars - 1)) / static_cast<float>(bars);
         float x = bar_x;
@@ -2616,6 +2657,14 @@ void draw(App& app) {
                 overlay, sizeof overlay, "%s  %.0f%%", tr(kTranscribe, app.language),
                 std::clamp(fraction, 0.f, 1.f) * 100.f);
             place_bar("notes", fraction, overlay);
+        }
+        if (show_mask) {
+            const float fraction = app.player->pitch_mask_progress();
+            char overlay[64];
+            std::snprintf(
+                overlay, sizeof overlay, "%s  %.0f%%", tr(kPitchMaskBuild, app.language),
+                std::clamp(fraction, 0.f, 1.f) * 100.f);
+            place_bar("pitch-mask", fraction, overlay);
         }
     }
     if (importing && app.session != nullptr) {

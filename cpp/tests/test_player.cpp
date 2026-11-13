@@ -1,3 +1,4 @@
+#include "bt/pitch_mask.hpp"
 #include "bt/player.hpp"
 #include "bt/time_stretch.hpp"
 
@@ -260,4 +261,115 @@ TEST_CASE("hard right pan keeps the left channel silent") {
     REQUIRE(player.render(output.data(), 2048) == 2048);
     REQUIRE_THAT(output[1000 * 2], Catch::Matchers::WithinAbs(0.0, 1e-3));
     REQUIRE(std::fabs(output[1000 * 2 + 1]) > 0.4f);
+}
+
+TEST_CASE("pitch mask highpass removes DC on the selected stem") {
+    bt::Player player;
+    player.set_song(constant_song(44100, 0.5f, 0));
+    std::array<float, bt::kStemCount> gain{};
+    gain.fill(1.f);
+    player.set_mix(gain, {}, {});
+    player.set_pitch_mask(true, 0, 40, 80, bt::Player::PitchMaskBackend::Dsp);
+    player.play();
+    std::vector<float> warm(static_cast<std::size_t>(8192 * 2));
+    REQUIRE(player.render(warm.data(), 8192) == 8192);
+    std::vector<float> output(static_cast<std::size_t>(4096 * 2));
+    REQUIRE(player.render(output.data(), 4096) == 4096);
+    REQUIRE_THAT(output[2000 * 2], Catch::Matchers::WithinAbs(0.0, 2e-2));
+    REQUIRE_THAT(output[2000 * 2 + 1], Catch::Matchers::WithinAbs(0.0, 2e-2));
+
+    player.set_pitch_mask(true, 1, 40, 80, bt::Player::PitchMaskBackend::Dsp);
+    player.seek(0);
+    REQUIRE(player.render(warm.data(), 8192) == 8192);
+    REQUIRE(player.render(output.data(), 4096) == 4096);
+    REQUIRE(std::fabs(output[2000 * 2]) > 0.4f);
+}
+
+TEST_CASE("harmonic pitch mask keeps note partials") {
+    constexpr int kFrames = 44100;
+    std::vector<float> mono(static_cast<std::size_t>(kFrames));
+    for (int i = 0; i < kFrames; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(bt::kSampleRate);
+        // A4 (440) with 2nd harmonic, plus an unrelated 100 Hz tone.
+        mono[static_cast<std::size_t>(i)] =
+            0.45f * std::sin(2.f * 3.14159265f * 440.f * t) +
+            0.25f * std::sin(2.f * 3.14159265f * 880.f * t) +
+            0.45f * std::sin(2.f * 3.14159265f * 100.f * t);
+    }
+    std::vector<bt::PitchMaskNote> notes{bt::PitchMaskNote{69, 0.0, 1.0}};
+    std::vector<float> filtered(static_cast<std::size_t>(kFrames));
+    bt::spectral_harmonic_mono(
+        mono.data(), filtered.data(), kFrames, 60, 76, notes.data(), notes.size());
+
+    auto energy = [](const std::vector<float>& x, float hz) {
+        double re = 0;
+        double im = 0;
+        for (int i = 0; i < static_cast<int>(x.size()); ++i) {
+            const double phase =
+                2.0 * 3.141592653589793 * static_cast<double>(hz) * static_cast<double>(i) /
+                bt::kSampleRate;
+            re += static_cast<double>(x[static_cast<std::size_t>(i)]) * std::cos(phase);
+            im += static_cast<double>(x[static_cast<std::size_t>(i)]) * std::sin(phase);
+        }
+        return std::sqrt(re * re + im * im) / static_cast<double>(x.size());
+    };
+
+    REQUIRE(energy(filtered, 100.f) < energy(mono, 100.f) * 0.2);
+    REQUIRE(energy(filtered, 440.f) > energy(mono, 440.f) * 0.7);
+    REQUIRE(energy(filtered, 880.f) > energy(mono, 880.f) * 0.7);
+
+    std::vector<float> empty_out(static_cast<std::size_t>(kFrames), 1.f);
+    bt::spectral_harmonic_mono(mono.data(), empty_out.data(), kFrames, 60, 76, nullptr, 0);
+    REQUIRE_THAT(empty_out[1000], Catch::Matchers::WithinAbs(0.0, 1e-6));
+}
+
+TEST_CASE("spectral pitch mask removes out-of-band energy") {
+    constexpr int kFrames = 44100;
+    std::vector<float> mono(static_cast<std::size_t>(kFrames));
+    for (int i = 0; i < kFrames; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(bt::kSampleRate);
+        mono[static_cast<std::size_t>(i)] =
+            0.5f * std::sin(2.f * 3.14159265f * 100.f * t) +
+            0.5f * std::sin(2.f * 3.14159265f * 880.f * t);
+    }
+    std::vector<float> filtered(static_cast<std::size_t>(kFrames));
+    // Keep around A5 (880 Hz); reject 100 Hz.
+    bt::spectral_brickwall_mono(mono.data(), filtered.data(), kFrames, 80, 84);
+
+    auto energy = [](const std::vector<float>& x, float hz) {
+        double re = 0;
+        double im = 0;
+        for (int i = 0; i < static_cast<int>(x.size()); ++i) {
+            const double phase =
+                2.0 * 3.141592653589793 * static_cast<double>(hz) * static_cast<double>(i) /
+                bt::kSampleRate;
+            re += static_cast<double>(x[static_cast<std::size_t>(i)]) * std::cos(phase);
+            im += static_cast<double>(x[static_cast<std::size_t>(i)]) * std::sin(phase);
+        }
+        return std::sqrt(re * re + im * im) / static_cast<double>(x.size());
+    };
+
+    REQUIRE(energy(filtered, 100.f) < energy(mono, 100.f) * 0.15);
+    REQUIRE(energy(filtered, 880.f) > energy(mono, 880.f) * 0.7);
+
+    auto stems = constant_song(kFrames, 0.f, 0);
+    for (int i = 0; i < kFrames; ++i) {
+        stems->audio[0][static_cast<std::size_t>(i)] = mono[static_cast<std::size_t>(i)];
+        stems->audio[0][static_cast<std::size_t>(kFrames + i)] = mono[static_cast<std::size_t>(i)];
+    }
+    bt::Player player;
+    player.set_song(stems);
+    std::array<float, bt::kStemCount> gain{};
+    gain.fill(1.f);
+    player.set_mix(gain, {}, {});
+    player.set_pitch_mask(true, 0, 80, 84, bt::Player::PitchMaskBackend::Spectral);
+    player.play();
+    std::vector<float> output(static_cast<std::size_t>(kFrames * 2));
+    REQUIRE(player.render(output.data(), kFrames) == kFrames);
+    std::vector<float> left(static_cast<std::size_t>(kFrames));
+    for (int i = 0; i < kFrames; ++i) {
+        left[static_cast<std::size_t>(i)] = output[static_cast<std::size_t>(i * 2)];
+    }
+    REQUIRE(energy(left, 100.f) < energy(mono, 100.f) * 0.2);
+    REQUIRE(energy(left, 880.f) > energy(mono, 880.f) * 0.5);
 }

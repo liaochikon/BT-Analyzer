@@ -1,9 +1,11 @@
 #pragma once
 
+#include "bt/pitch_mask.hpp"
 #include "bt/separator.hpp"
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <expected>
 #include <memory>
 #include <string>
@@ -21,6 +23,8 @@ struct PlaybackDevice {
 // Seek, speed, and loop positions are on the song timeline (the waveform).
 class Player {
 public:
+    enum class PitchMaskBackend { Dsp, Spectral, Harmonic };
+
     struct Snapshot {
         bool playing = false;
         bool ready = false;
@@ -45,6 +49,17 @@ public:
     void set_mix(
         const std::array<float, kStemCount>& gain, const std::array<bool, kStemCount>& mute,
         const std::array<bool, kStemCount>& solo, const std::array<float, kStemCount>& pan = {});
+    // Band-limits or harmonic-masks the selected stem to the MIDI viewport.
+    // Spectral/Harmonic rebuild on a background worker (UI only publishes; no hitch).
+    void set_pitch_mask(
+        bool enabled, int stem, int lo_midi, int hi_midi,
+        PitchMaskBackend backend = PitchMaskBackend::Harmonic,
+        std::shared_ptr<const std::vector<PitchMaskNote>> notes = {},
+        std::uint64_t notes_revision = 0);
+    // Blocks until the latest pitch-mask job is applied (for tests / sync render).
+    void wait_pitch_mask();
+    bool pitch_mask_building() const;
+    float pitch_mask_progress() const;
 
     void play();
     void pause();
@@ -73,11 +88,18 @@ private:
     bool ensure_context();
     std::expected<void, std::string> open_playback(const void* device_id);
     struct Mix;
+    struct PitchMask;
 
     void wake();
     void discard_ring();
     void install_song();
     void apply_transport();
+    void reset_pitch_mask_filters();
+    void sync_pitch_mask_filters();
+    void clear_spectral_mask();
+    void request_spectral_mask_rebuild();
+    void mask_thread_main();
+    bool spectral_cache_matches(const PitchMask& mask, const Stems* stems) const;
     int read_source(int start, int frames, float* interleaved);
     int synthesize(float* interleaved, int frames);
     void arm_click(bool downbeat);

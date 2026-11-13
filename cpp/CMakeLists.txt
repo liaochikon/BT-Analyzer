@@ -120,6 +120,7 @@ add_library(bt_stem STATIC
   src/session.cpp
   src/time_stretch.cpp
   src/player.cpp
+  src/pitch_mask.cpp
   src/beat_track.cpp
   src/project.cpp)
 target_include_directories(bt_stem PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

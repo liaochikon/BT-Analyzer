@@ -1,5 +1,6 @@
 #include "bt/player.hpp"
 
+#include "bt/pitch_mask.hpp"
 #include "bt/time_stretch.hpp"
 
 #include <algorithm>
@@ -27,9 +28,15 @@ namespace {
 
 constexpr int kRingFrames = 8192;
 constexpr int kBlockFrames = 512;
+constexpr int kPitchMaskHarmonicSemitones = 12;
+constexpr float kPitchMaskSmooth = 0.08f;
 
 float decibel_to_gain(float db) {
     return std::pow(10.f, db / 20.f);
+}
+
+float midi_to_hz(float midi) {
+    return 440.f * std::pow(2.f, (midi - 69.f) / 12.f);
 }
 
 std::string device_token(const ma_device_id& id) {
@@ -39,6 +46,66 @@ std::string device_token(const ma_device_id& id) {
         std::snprintf(token.data() + index * 2, 3, "%02x", bytes[index]);
     }
     return token;
+}
+
+struct BiquadCoeffs {
+    float b0 = 1.f;
+    float b1 = 0.f;
+    float b2 = 0.f;
+    float a1 = 0.f;
+    float a2 = 0.f;
+};
+
+struct BiquadState {
+    float x1 = 0.f;
+    float x2 = 0.f;
+    float y1 = 0.f;
+    float y2 = 0.f;
+
+    void reset() {
+        x1 = x2 = y1 = y2 = 0.f;
+    }
+
+    float process(float sample, const BiquadCoeffs& c) {
+        const float y = c.b0 * sample + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2;
+        x2 = x1;
+        x1 = sample;
+        y2 = y1;
+        y1 = y;
+        return y;
+    }
+};
+
+BiquadCoeffs make_lowpass(float hz, float sample_rate) {
+    const float nyquist = sample_rate * 0.5f;
+    const float cutoff = std::clamp(hz, 20.f, nyquist * 0.95f);
+    const float w0 = 2.f * 3.14159265358979323846f * cutoff / sample_rate;
+    const float cos_w0 = std::cos(w0);
+    const float sin_w0 = std::sin(w0);
+    const float alpha = sin_w0 * 0.7071067811865476f;
+    const float b0 = (1.f - cos_w0) * 0.5f;
+    const float b1 = 1.f - cos_w0;
+    const float b2 = b0;
+    const float a0 = 1.f + alpha;
+    const float a1 = -2.f * cos_w0;
+    const float a2 = 1.f - alpha;
+    return {b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0};
+}
+
+BiquadCoeffs make_highpass(float hz, float sample_rate) {
+    const float nyquist = sample_rate * 0.5f;
+    const float cutoff = std::clamp(hz, 20.f, nyquist * 0.45f);
+    const float w0 = 2.f * 3.14159265358979323846f * cutoff / sample_rate;
+    const float cos_w0 = std::cos(w0);
+    const float sin_w0 = std::sin(w0);
+    const float alpha = sin_w0 * 0.7071067811865476f;
+    const float b0 = (1.f + cos_w0) * 0.5f;
+    const float b1 = -(1.f + cos_w0);
+    const float b2 = b0;
+    const float a0 = 1.f + alpha;
+    const float a1 = -2.f * cos_w0;
+    const float a2 = 1.f - alpha;
+    return {b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0};
 }
 
 }  // namespace
@@ -52,11 +119,52 @@ struct Player::Mix {
     Mix() { gain.fill(1.f); }
 };
 
+struct Player::PitchMask {
+    bool enabled = false;
+    int stem = 0;
+    int lo_midi = 21;
+    int hi_midi = 108;
+    PitchMaskBackend backend = PitchMaskBackend::Harmonic;
+    std::shared_ptr<const std::vector<PitchMaskNote>> notes;
+    std::uint64_t notes_revision = 0;
+};
+
 struct Player::State {
     TimeStretcher stretcher;
     std::mutex mix_mu;
     Mix published_mix;
     Mix block_mix;
+    PitchMask published_mask;
+    PitchMask block_mask;
+    BiquadCoeffs highpass{};
+    BiquadCoeffs lowpass{};
+    BiquadState highpass_l{};
+    BiquadState highpass_r{};
+    BiquadState lowpass_l{};
+    BiquadState lowpass_r{};
+    float applied_lo_hz = 0.f;
+    float applied_hi_hz = 0.f;
+    float target_lo_hz = 0.f;
+    float target_hi_hz = 0.f;
+    bool filter_armed = false;
+    std::mutex spectral_mu;
+    std::shared_ptr<const std::vector<float>> spectral_audio;
+    std::int64_t spectral_frames = 0;
+    int spectral_stem = -1;
+    int spectral_lo = 0;
+    int spectral_hi = 0;
+    PitchMaskBackend spectral_backend = PitchMaskBackend::Harmonic;
+    std::uint64_t spectral_notes_revision = 0;
+    const Stems* spectral_source = nullptr;
+    std::mutex mask_mu;
+    std::condition_variable mask_cv;
+    std::condition_variable mask_idle_cv;
+    bool mask_stop = false;
+    bool mask_request = false;
+    bool mask_busy = false;
+    std::atomic<bool> mask_building{false};
+    std::atomic<float> mask_progress{0.f};
+    std::thread mask_worker;
     std::mutex song_mu;
     std::shared_ptr<const Stems> published_stems;
     std::uint64_t published_generation = 0;
@@ -118,11 +226,21 @@ Player::Player() : state_(std::make_unique<State>()) {
     state_->stretcher.set_source([this](int start, int frames, float* interleaved) {
         return read_source(start, frames, interleaved);
     });
+    state_->mask_worker = std::thread([this] { mask_thread_main(); });
 }
 
 Player::~Player() {
     if (state_ == nullptr) {
         return;
+    }
+    {
+        std::lock_guard lock(state_->mask_mu);
+        state_->mask_stop = true;
+        state_->mask_request = true;
+    }
+    state_->mask_cv.notify_all();
+    if (state_->mask_worker.joinable()) {
+        state_->mask_worker.join();
     }
     state_->running.store(false);
     wake();
@@ -178,6 +296,301 @@ void Player::set_mix(
     state_->published_mix.mute = mute;
     state_->published_mix.solo = solo;
     state_->published_mix.pan = pan;
+}
+
+void Player::set_pitch_mask(
+    bool enabled, int stem, int lo_midi, int hi_midi, PitchMaskBackend backend,
+    std::shared_ptr<const std::vector<PitchMaskNote>> notes, std::uint64_t notes_revision) {
+    int lo = std::clamp(lo_midi, 0, 127);
+    int hi = std::clamp(hi_midi, 0, 127);
+    if (lo > hi) {
+        std::swap(lo, hi);
+    }
+    stem = std::clamp(stem, 0, kStemCount - 1);
+    {
+        std::lock_guard lock(state_->mix_mu);
+        state_->published_mask.enabled = enabled;
+        state_->published_mask.stem = stem;
+        state_->published_mask.lo_midi = lo;
+        state_->published_mask.hi_midi = hi;
+        state_->published_mask.backend = backend;
+        state_->published_mask.notes = std::move(notes);
+        state_->published_mask.notes_revision = notes_revision;
+    }
+    const bool cached =
+        backend == PitchMaskBackend::Spectral || backend == PitchMaskBackend::Harmonic;
+    if (!enabled || !cached || lo >= hi) {
+        clear_spectral_mask();
+        {
+            std::lock_guard lock(state_->mask_mu);
+            state_->mask_request = false;
+        }
+        state_->mask_building.store(false);
+        state_->mask_progress.store(0.f);
+        state_->mask_idle_cv.notify_all();
+        return;
+    }
+    state_->mask_building.store(true);
+    state_->mask_progress.store(0.f);
+    request_spectral_mask_rebuild();
+}
+
+bool Player::pitch_mask_building() const {
+    return state_->mask_building.load();
+}
+
+float Player::pitch_mask_progress() const {
+    return std::clamp(state_->mask_progress.load(), 0.f, 1.f);
+}
+
+void Player::wait_pitch_mask() {
+    for (;;) {
+        PitchMask mask;
+        std::shared_ptr<const Stems> stems;
+        {
+            std::lock_guard lock(state_->mix_mu);
+            mask = state_->published_mask;
+        }
+        {
+            std::lock_guard lock(state_->song_mu);
+            stems = state_->published_stems;
+        }
+        const bool cached =
+            mask.backend == PitchMaskBackend::Spectral || mask.backend == PitchMaskBackend::Harmonic;
+        if (!mask.enabled || !cached || mask.lo_midi >= mask.hi_midi) {
+            std::unique_lock lock(state_->mask_mu);
+            if (!state_->mask_busy && !state_->mask_request) {
+                return;
+            }
+            state_->mask_idle_cv.wait(lock, [&] {
+                return !state_->mask_busy && !state_->mask_request;
+            });
+            return;
+        }
+        bool ready = false;
+        {
+            std::lock_guard lock(state_->spectral_mu);
+            ready = spectral_cache_matches(mask, stems.get());
+        }
+        if (ready) {
+            std::unique_lock lock(state_->mask_mu);
+            if (!state_->mask_busy && !state_->mask_request) {
+                return;
+            }
+            state_->mask_idle_cv.wait(lock, [&] {
+                return !state_->mask_busy && !state_->mask_request;
+            });
+            continue;
+        }
+        request_spectral_mask_rebuild();
+        std::unique_lock lock(state_->mask_mu);
+        state_->mask_idle_cv.wait(lock, [&] {
+            return !state_->mask_busy && !state_->mask_request;
+        });
+    }
+}
+
+void Player::reset_pitch_mask_filters() {
+    state_->highpass_l.reset();
+    state_->highpass_r.reset();
+    state_->lowpass_l.reset();
+    state_->lowpass_r.reset();
+}
+
+void Player::clear_spectral_mask() {
+    std::lock_guard lock(state_->spectral_mu);
+    if (!state_->spectral_audio) {
+        return;
+    }
+    state_->spectral_audio.reset();
+    state_->spectral_frames = 0;
+    state_->spectral_stem = -1;
+    state_->spectral_notes_revision = 0;
+    state_->spectral_source = nullptr;
+    discard_ring();
+    wake();
+}
+
+bool Player::spectral_cache_matches(const PitchMask& mask, const Stems* stems) const {
+    return state_->spectral_audio && stems != nullptr && state_->spectral_source == stems &&
+           state_->spectral_stem == mask.stem && state_->spectral_lo == mask.lo_midi &&
+           state_->spectral_hi == mask.hi_midi && state_->spectral_frames == stems->frames &&
+           state_->spectral_backend == mask.backend &&
+           state_->spectral_notes_revision == mask.notes_revision;
+}
+
+void Player::request_spectral_mask_rebuild() {
+    {
+        std::lock_guard lock(state_->mask_mu);
+        state_->mask_request = true;
+    }
+    state_->mask_cv.notify_one();
+}
+
+void Player::mask_thread_main() {
+    for (;;) {
+        {
+            std::unique_lock lock(state_->mask_mu);
+            state_->mask_cv.wait(lock, [&] { return state_->mask_stop || state_->mask_request; });
+            if (state_->mask_stop) {
+                state_->mask_busy = false;
+                state_->mask_request = false;
+                state_->mask_idle_cv.notify_all();
+                return;
+            }
+            state_->mask_request = false;
+            state_->mask_busy = true;
+        }
+        state_->mask_building.store(true);
+        state_->mask_progress.store(0.f);
+
+        PitchMask mask;
+        {
+            std::lock_guard lock(state_->mix_mu);
+            mask = state_->published_mask;
+        }
+        const bool cached =
+            mask.backend == PitchMaskBackend::Spectral || mask.backend == PitchMaskBackend::Harmonic;
+        auto finish_idle = [&]() {
+            state_->mask_building.store(false);
+            {
+                std::lock_guard lock(state_->mask_mu);
+                state_->mask_busy = false;
+            }
+            state_->mask_idle_cv.notify_all();
+        };
+        if (!mask.enabled || !cached || mask.lo_midi >= mask.hi_midi) {
+            clear_spectral_mask();
+            state_->mask_progress.store(0.f);
+            finish_idle();
+            continue;
+        }
+
+        std::shared_ptr<const Stems> stems;
+        {
+            std::lock_guard lock(state_->song_mu);
+            stems = state_->published_stems;
+        }
+        if (!stems || stems->frames <= 0) {
+            clear_spectral_mask();
+            state_->mask_progress.store(0.f);
+            finish_idle();
+            continue;
+        }
+        const auto& source = stems->audio[static_cast<std::size_t>(mask.stem)];
+        if (static_cast<std::int64_t>(source.size()) < stems->frames * 2) {
+            clear_spectral_mask();
+            state_->mask_progress.store(0.f);
+            finish_idle();
+            continue;
+        }
+
+        bool already = false;
+        {
+            std::lock_guard lock(state_->spectral_mu);
+            already = spectral_cache_matches(mask, stems.get());
+        }
+        if (already) {
+            state_->mask_progress.store(1.f);
+            finish_idle();
+            continue;
+        }
+
+        auto filtered = std::make_shared<std::vector<float>>(static_cast<std::size_t>(stems->frames * 2));
+        auto report = [&](float fraction) {
+            state_->mask_progress.store(std::clamp(fraction, 0.f, 1.f));
+        };
+        if (mask.backend == PitchMaskBackend::Harmonic) {
+            const PitchMaskNote* notes = mask.notes ? mask.notes->data() : nullptr;
+            const std::size_t count = mask.notes ? mask.notes->size() : 0;
+            spectral_harmonic_planar(
+                source.data(), filtered->data(), stems->frames, mask.lo_midi, mask.hi_midi, notes,
+                count, kSampleRate, report);
+        } else {
+            spectral_brickwall_planar(
+                source.data(), filtered->data(), stems->frames, mask.lo_midi, mask.hi_midi,
+                kSampleRate, report);
+        }
+
+        PitchMask latest;
+        {
+            std::lock_guard lock(state_->mix_mu);
+            latest = state_->published_mask;
+        }
+        const bool still_wanted =
+            latest.enabled && latest.backend == mask.backend && latest.stem == mask.stem &&
+            latest.lo_midi == mask.lo_midi && latest.hi_midi == mask.hi_midi &&
+            latest.notes_revision == mask.notes_revision;
+        if (!still_wanted) {
+            {
+                std::lock_guard lock(state_->mask_mu);
+                state_->mask_busy = false;
+                if (!state_->mask_stop) {
+                    state_->mask_request = true;
+                    state_->mask_building.store(true);
+                    state_->mask_progress.store(0.f);
+                } else {
+                    state_->mask_building.store(false);
+                }
+            }
+            state_->mask_cv.notify_one();
+            state_->mask_idle_cv.notify_all();
+            continue;
+        }
+
+        {
+            std::lock_guard lock(state_->spectral_mu);
+            state_->spectral_audio = std::move(filtered);
+            state_->spectral_frames = stems->frames;
+            state_->spectral_stem = mask.stem;
+            state_->spectral_lo = mask.lo_midi;
+            state_->spectral_hi = mask.hi_midi;
+            state_->spectral_backend = mask.backend;
+            state_->spectral_notes_revision = mask.notes_revision;
+            state_->spectral_source = stems.get();
+        }
+        discard_ring();
+        wake();
+        state_->mask_progress.store(1.f);
+        finish_idle();
+    }
+}
+
+void Player::sync_pitch_mask_filters() {
+    const PitchMask& mask = state_->block_mask;
+    const bool want =
+        mask.enabled && mask.backend == PitchMaskBackend::Dsp && mask.lo_midi < mask.hi_midi;
+    if (!want) {
+        if (state_->filter_armed) {
+            reset_pitch_mask_filters();
+            state_->filter_armed = false;
+        }
+        return;
+    }
+
+    const float target_lo = midi_to_hz(static_cast<float>(mask.lo_midi));
+    const float target_hi =
+        midi_to_hz(static_cast<float>(mask.hi_midi + kPitchMaskHarmonicSemitones));
+    state_->target_lo_hz = target_lo;
+    state_->target_hi_hz = std::max(target_hi, target_lo * 1.05f);
+
+    if (!state_->filter_armed) {
+        state_->applied_lo_hz = state_->target_lo_hz;
+        state_->applied_hi_hz = state_->target_hi_hz;
+        state_->highpass = make_highpass(state_->applied_lo_hz, static_cast<float>(kSampleRate));
+        state_->lowpass = make_lowpass(state_->applied_hi_hz, static_cast<float>(kSampleRate));
+        reset_pitch_mask_filters();
+        state_->filter_armed = true;
+        return;
+    }
+
+    state_->applied_lo_hz += (state_->target_lo_hz - state_->applied_lo_hz) * kPitchMaskSmooth;
+    state_->applied_hi_hz += (state_->target_hi_hz - state_->applied_hi_hz) * kPitchMaskSmooth;
+    if (state_->applied_hi_hz < state_->applied_lo_hz * 1.05f) {
+        state_->applied_hi_hz = state_->applied_lo_hz * 1.05f;
+    }
+    state_->highpass = make_highpass(state_->applied_lo_hz, static_cast<float>(kSampleRate));
+    state_->lowpass = make_lowpass(state_->applied_hi_hz, static_cast<float>(kSampleRate));
 }
 
 void Player::play() {
@@ -476,6 +889,17 @@ void Player::install_song() {
     state_->stretcher.set_rate(state_->applied_speed);
     state_->stretcher.reset(0);
     state_->applied_seek = state_->seek_serial.load(std::memory_order_acquire);
+    reset_pitch_mask_filters();
+    {
+        std::lock_guard lock(state_->spectral_mu);
+        if (state_->spectral_source != state_->stems.get()) {
+            state_->spectral_audio.reset();
+            state_->spectral_frames = 0;
+            state_->spectral_stem = -1;
+            state_->spectral_notes_revision = 0;
+            state_->spectral_source = nullptr;
+        }
+    }
 }
 
 void Player::apply_transport() {
@@ -487,12 +911,14 @@ void Player::apply_transport() {
         state_->position.store(seconds);
         state_->metro_song = seconds;
         state_->click_left = 0;
+        reset_pitch_mask_filters();
     }
     const float speed = state_->speed.load();
     if (speed != state_->applied_speed) {
         state_->applied_speed = speed;
         state_->stretcher.set_rate(speed);
         state_->stretcher.reset(state_->position.load() * static_cast<double>(kSampleRate));
+        reset_pitch_mask_filters();
     }
 }
 
@@ -504,6 +930,25 @@ int Player::read_source(int start, int frames, float* interleaved) {
     const int available = static_cast<int>(std::min<std::int64_t>(frames, stems->frames - start));
     std::fill_n(interleaved, available * 2, 0.f);
     const Mix& mix = state_->block_mix;
+    const PitchMask& mask = state_->block_mask;
+    const bool dsp_mask = state_->filter_armed && mask.enabled &&
+                          mask.backend == PitchMaskBackend::Dsp && mask.lo_midi < mask.hi_midi;
+    const bool cached_mask = mask.enabled && (mask.backend == PitchMaskBackend::Spectral ||
+                                              mask.backend == PitchMaskBackend::Harmonic) &&
+                             mask.lo_midi < mask.hi_midi;
+    std::shared_ptr<const std::vector<float>> spectral;
+    std::int64_t spectral_frames = 0;
+    int spectral_stem = -1;
+    if (cached_mask) {
+        std::lock_guard lock(state_->spectral_mu);
+        // Exact match preferred; otherwise keep same-stem stale cache while rebuild runs.
+        if (state_->spectral_audio && state_->spectral_source == stems.get() &&
+            state_->spectral_stem == mask.stem && state_->spectral_backend == mask.backend) {
+            spectral = state_->spectral_audio;
+            spectral_frames = state_->spectral_frames;
+            spectral_stem = state_->spectral_stem;
+        }
+    }
     bool any_solo = false;
     for (bool solo : mix.solo) {
         any_solo = any_solo || solo;
@@ -519,16 +964,34 @@ int Player::read_source(int start, int frames, float* interleaved) {
         if (static_cast<std::int64_t>(audio.size()) < (stems->frames) * 2) {
             continue;
         }
+        const bool use_spectral =
+            spectral && stem == spectral_stem && spectral_frames == stems->frames &&
+            static_cast<std::int64_t>(spectral->size()) >= stems->frames * 2;
+        // While a new mask is building, keep the previous cache (same stem) to avoid hitches.
+        // Before the first cache exists, silence the masked stem instead of leaking dry audio.
+        if (cached_mask && stem == mask.stem && !use_spectral) {
+            continue;
+        }
+        const float* planar = use_spectral ? spectral->data() : audio.data();
         const float gain = mix.gain[static_cast<std::size_t>(stem)] * master;
         const float pan = std::clamp(mix.pan[static_cast<std::size_t>(stem)], -1.f, 1.f);
         const float theta = (pan + 1.f) * 0.78539816339f;
         const float pan_l = std::cos(theta) * 1.41421356237f;
         const float pan_r = std::sin(theta) * 1.41421356237f;
-        const float* left = audio.data() + start;
-        const float* right = audio.data() + stems->frames + start;
+        const float* left = planar + start;
+        const float* right = planar + stems->frames + start;
+        const bool filter_this = dsp_mask && stem == mask.stem;
         for (int i = 0; i < available; ++i) {
-            interleaved[i * 2] += left[i] * gain * pan_l;
-            interleaved[i * 2 + 1] += right[i] * gain * pan_r;
+            float sample_l = left[i] * gain * pan_l;
+            float sample_r = right[i] * gain * pan_r;
+            if (filter_this) {
+                sample_l = state_->highpass_l.process(sample_l, state_->highpass);
+                sample_l = state_->lowpass_l.process(sample_l, state_->lowpass);
+                sample_r = state_->highpass_r.process(sample_r, state_->highpass);
+                sample_r = state_->lowpass_r.process(sample_r, state_->lowpass);
+            }
+            interleaved[i * 2] += sample_l;
+            interleaved[i * 2 + 1] += sample_r;
         }
     }
     return available;
@@ -538,7 +1001,15 @@ int Player::synthesize(float* interleaved, int frames) {
     {
         std::lock_guard lock(state_->mix_mu);
         state_->block_mix = state_->published_mix;
+        const bool stem_changed = state_->block_mask.stem != state_->published_mask.stem;
+        const bool enabled_changed = state_->block_mask.enabled != state_->published_mask.enabled;
+        state_->block_mask = state_->published_mask;
+        if (stem_changed || enabled_changed) {
+            reset_pitch_mask_filters();
+            state_->filter_armed = false;
+        }
     }
+    sync_pitch_mask_filters();
     int done = 0;
     while (done < frames) {
         const double position = state_->stretcher.position() / static_cast<double>(kSampleRate);
@@ -590,6 +1061,7 @@ int Player::render(float* interleaved, int frames) {
     install_song();
     apply_transport();
     accept_count_in();
+    wait_pitch_mask();
     if (interleaved == nullptr || frames <= 0) {
         return 0;
     }

@@ -424,6 +424,7 @@ struct App {
     bool fret_harmonic = false;
     int key_min = 21;
     int key_max = 108;
+    bool pitch_mask = false;
     float hand_center = 5.f;
     double midi_drag_origin = 0;
     float midi_drag_y = 0.f;
