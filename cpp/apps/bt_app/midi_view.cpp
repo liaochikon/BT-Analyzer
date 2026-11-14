@@ -7,7 +7,6 @@
 namespace btapp {
 namespace {
 
-constexpr int kRollDrag = 7;
 constexpr int kFallDrag = 8;
 constexpr int kHandSpan = 4;
 constexpr double kFallLook = 4.0;
@@ -622,170 +621,6 @@ void draw_fall(App& app, ImDrawList* draw, ImVec2 origin, ImVec2 size, int stem,
     }
 }
 
-void draw_roll(App& app, ImDrawList* draw, ImVec2 origin, ImVec2 size, int stem, const bt::Player::Snapshot& transport, double length, bool ready) {
-    const float scale = ui_scale();
-    const int lo = kPianoLo;
-    const int hi = kPianoHi;
-    const int span = hi - lo + 1;
-    int range_lo = 0;
-    int range_hi = 0;
-    key_span(app, range_lo, range_hi);
-    range_lo = std::clamp(range_lo, lo, hi);
-    range_hi = std::clamp(range_hi, lo, hi);
-    if (range_lo > range_hi) {
-        std::swap(range_lo, range_hi);
-    }
-    const float lane = size.y / static_cast<float>(span);
-    const float label_w = std::min(58.f * scale, size.x * 0.2f);
-    const float grid_x = origin.x + label_w;
-    const float grid_w = std::max(1.f, size.x - label_w);
-    auto y_of = [&](int pitch) {
-        return origin.y + (static_cast<float>(hi - pitch) / static_cast<float>(span)) * size.y;
-    };
-    auto x_of = [&](double seconds) {
-        if (!(length > 0)) {
-            return grid_x;
-        }
-        return grid_x + static_cast<float>(seconds / length) * grid_w;
-    };
-    draw->AddRectFilled(origin, ImVec2(grid_x, origin.y + size.y), IM_COL32(18, 18, 18, 255));
-    for (int pitch = lo; pitch <= hi; ++pitch) {
-        const float y = y_of(pitch);
-        if (black_key(pitch)) {
-            draw->AddRectFilled(ImVec2(grid_x, y), ImVec2(grid_x + grid_w, y + std::max(1.f, lane)), IM_COL32(0, 0, 0, 71));
-        } else if (pitch % 12 == 0) {
-            draw->AddRectFilled(ImVec2(grid_x, y), ImVec2(grid_x + grid_w, y + std::max(1.f, lane)), IM_COL32(255, 255, 255, 13));
-        }
-    }
-    for (int pitch = lo; pitch <= hi; ++pitch) {
-        if (pitch >= range_lo && pitch <= range_hi) {
-            continue;
-        }
-        const float y = y_of(pitch);
-        draw->AddRectFilled(ImVec2(grid_x, y), ImVec2(grid_x + grid_w, y + std::max(1.f, lane)), IM_COL32(0, 0, 0, 145));
-    }
-    if (app.metro && length > 0) {
-        each_metro_beat(app, 0, length + 1e-4, [&](double time, bool downbeat) {
-            if (time > length) {
-                return;
-            }
-            const float x = x_of(time);
-            draw->AddRectFilled(
-                ImVec2(x, origin.y), ImVec2(x + (downbeat ? std::max(1.f, scale) : 1.f), origin.y + size.y),
-                downbeat ? IM_COL32(255, 255, 255, 87) : IM_COL32(255, 255, 255, 31));
-        });
-    }
-    bool live[128] = {};
-    for (const MidiNote& note : app.notes[static_cast<std::size_t>(stem)]) {
-        if (note.pitch < lo || note.pitch > hi) {
-            continue;
-        }
-        const bool masked = note.pitch >= range_lo && note.pitch <= range_hi;
-        const bool sounding = note.start <= transport.position && transport.position < note.end;
-        const float alpha =
-            (sounding ? 1.f : 0.5f + 0.4f * (static_cast<float>(note.velocity) / 127.f)) *
-            (masked ? 1.f : kOutOfRangeNoteAlpha);
-        const float x = x_of(note.start);
-        const float w = std::max(2.f * scale, x_of(note.end) - x);
-        const float y = y_of(note.pitch);
-        const float bar_h = std::max(3.f * scale, lane - scale);
-        draw->AddRectFilled(ImVec2(x, y + scale), ImVec2(x + w, y + bar_h), with_alpha(kPitchColor[note.pitch % 12], alpha));
-        if (masked && sounding && note.pitch >= 0 && note.pitch < 128) {
-            live[note.pitch] = true;
-        }
-    }
-    for (int pass = 0; pass < 2; ++pass) {
-        for (int pitch = lo; pitch <= hi; ++pitch) {
-            const bool black = black_key(pitch);
-            if (black != (pass == 1)) {
-                continue;
-            }
-            const float y = y_of(pitch);
-            const bool sounding = pitch >= 0 && pitch < 128 && live[pitch];
-            const ImU32 color = sounding ? kPitchColor[pitch % 12] : (black ? IM_COL32(22, 22, 22, 255) : IM_COL32(228, 228, 228, 255));
-            const float key_left = black ? grid_x - label_w * 0.55f : origin.x;
-            draw->AddRectFilled(ImVec2(key_left, y), ImVec2(grid_x, y + std::max(1.f, lane)), color);
-        }
-    }
-    for (int pitch = lo; pitch <= hi; ++pitch) {
-        if (pitch >= range_lo && pitch <= range_hi) {
-            continue;
-        }
-        const bool black = black_key(pitch);
-        const float y = y_of(pitch);
-        const float key_left = black ? grid_x - label_w * 0.55f : origin.x;
-        draw->AddRectFilled(ImVec2(key_left, y), ImVec2(grid_x, y + std::max(1.f, lane)), IM_COL32(0, 0, 0, 145));
-    }
-    for (int pitch = lo; pitch <= hi; ++pitch) {
-        const bool black = black_key(pitch);
-        const float key_w = black ? label_w * 0.55f : label_w * 0.45f;
-        const float key_left = black ? grid_x - key_w : origin.x;
-        char name[8];
-        midi_note_name(pitch, name, sizeof name);
-        float font = std::min(12.f * scale, std::max(8.f * scale, std::min(key_w * 0.34f, lane * 0.72f)));
-        ImVec2 ts = text_size(font, name);
-        if (ts.x > key_w - 3.f * scale || ts.y > lane - 1.f * scale) {
-            if (black || pitch % 12 != 0 || ts.y > lane * 11.f) {
-                continue;
-            }
-            font = std::max(8.f * scale, std::min(11.f * scale, (key_w - 3.f * scale) / 2.4f));
-            ts = text_size(font, name);
-            if (ts.x > key_w - 2.f * scale) {
-                continue;
-            }
-        }
-        const bool in_range = pitch >= range_lo && pitch <= range_hi;
-        const bool sounding = in_range && pitch >= 0 && pitch < 128 && live[pitch];
-        const ImU32 ink = !in_range ? IM_COL32(120, 120, 120, 180)
-                                    : (black || sounding ? IM_COL32(245, 245, 245, 230) : IM_COL32(28, 28, 28, 230));
-        text_at(draw, ImVec2(key_left + (key_w - ts.x) * 0.5f, y_of(pitch) + (lane - ts.y) * 0.5f), font, ink, name);
-    }
-    if (length > 0) {
-        draw_ab_loop(
-            draw, scale, ImVec2(grid_x, origin.y), ImVec2(grid_x + grid_w, origin.y + size.y), transport.loop_a >= 0, x_of(std::max(0.0, transport.loop_a)),
-            transport.loop_b >= 0, x_of(std::max(0.0, transport.loop_b)), false, IM_COL32(242, 242, 242, 40), IM_COL32(242, 242, 242, 255),
-            IM_COL32(242, 242, 242, 255), IM_COL32(26, 26, 26, 255), IM_COL32(26, 26, 26, 180));
-    }
-    if (ready && length > 0) {
-        const float head = x_of(std::clamp(transport.position, 0.0, length));
-        draw->AddRectFilled(ImVec2(head, origin.y), ImVec2(head + std::max(2.f, scale), origin.y + size.y), IM_COL32(242, 242, 242, 255));
-    }
-    if (!ready || !(length > 0)) {
-        return;
-    }
-    const bool hovered = ImGui::IsItemHovered();
-    auto time_at = [&](float mouse_x) {
-        const float fraction = std::clamp((mouse_x - grid_x) / grid_w, 0.f, 1.f);
-        return static_cast<double>(fraction) * length;
-    };
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        app.wave_drag = kRollDrag;
-        app.loop_drag = -1;
-    }
-    if (app.wave_drag == kRollDrag) {
-        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            app.wave_drag = -1;
-        } else {
-            app.player->seek(time_at(ImGui::GetIO().MousePos.x));
-        }
-    }
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-        if (edit_loop_begin(
-                app, transport, time_at(ImGui::GetIO().MousePos.x), length, ImGui::GetIO().MousePos.x, x_of(std::max(0.0, transport.loop_a)),
-                x_of(std::max(0.0, transport.loop_b)), 36.f * scale)) {
-            app.loop_drag = kRollDrag;
-            app.wave_drag = -1;
-        }
-    }
-    if (app.loop_drag == kRollDrag) {
-        if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-            app.loop_drag = -1;
-        } else {
-            edit_loop_drag(app, time_at(ImGui::GetIO().MousePos.x), length);
-        }
-    }
-}
-
 }  // namespace
 
 void draw_ab_marker(
@@ -901,18 +736,16 @@ void midi_note_name(int pitch, char* text, std::size_t size) {
 }
 
 void draw_midi_canvas(App& app, const bt::Player::Snapshot& transport, double length, bool ready, ImVec2 size) {
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && (app.wave_drag == kRollDrag || app.wave_drag == kFallDrag)) {
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && app.wave_drag == kFallDrag) {
         app.wave_drag = -1;
     }
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Right) && (app.loop_drag == kRollDrag || app.loop_drag == kFallDrag)) {
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Right) && app.loop_drag == kFallDrag) {
         app.loop_drag = -1;
     }
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("midi-view", size);
     const bool hovered = ImGui::IsItemHovered();
-    if (hovered && app.midi_view == MidiView::Roll) {
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-    } else if (hovered && app.midi_view == MidiView::Fall) {
+    if (hovered && app.midi_view == MidiView::Fall) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
     }
     ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -923,10 +756,8 @@ void draw_midi_canvas(App& app, const bt::Player::Snapshot& transport, double le
     const int stem = std::clamp(app.selected, 0, bt::kStemCount - 1);
     if (app.midi_view == MidiView::Guitar || app.midi_view == MidiView::Bass) {
         draw_fretboard(app, draw, origin, size, stem, transport.position);
-    } else if (app.midi_view == MidiView::Fall) {
-        draw_fall(app, draw, origin, size, stem, transport.position, length, ready);
     } else {
-        draw_roll(app, draw, origin, size, stem, transport, length, ready);
+        draw_fall(app, draw, origin, size, stem, transport.position, length, ready);
     }
     draw_beat_frame(app, draw, origin, size);
     draw->PopClipRect();

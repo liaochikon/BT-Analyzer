@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bt/midi_synth.hpp"
 #include "bt/pitch_mask.hpp"
 #include "bt/separator.hpp"
 
@@ -25,6 +26,13 @@ class Player {
 public:
     enum class PitchMaskBackend { Dsp, Spectral, Harmonic };
 
+    struct VerifyLane {
+        float gain = 1.f;
+        float pan = 0.f;
+        bool mute = false;
+        bool solo = false;
+    };
+
     struct Snapshot {
         bool playing = false;
         bool ready = false;
@@ -49,6 +57,12 @@ public:
     void set_mix(
         const std::array<float, kStemCount>& gain, const std::array<bool, kStemCount>& mute,
         const std::array<bool, kStemCount>& solo, const std::array<float, kStemCount>& pan = {});
+    // Per-stem verify submix: dry original + MIDI square (additive, not a stem replace).
+    // Each stem is independent; solo/mute only affect that stem's original vs MIDI lanes.
+    void set_verify_mix(
+        int stem, const VerifyLane& original, const VerifyLane& midi, int lo_midi, int hi_midi,
+        std::shared_ptr<const std::vector<MidiSynthNote>> notes = {},
+        std::uint64_t notes_revision = 0);
     // Band-limits or harmonic-masks the selected stem to the MIDI viewport.
     // Spectral/Harmonic rebuild on a background worker (UI only publishes; no hitch).
     void set_pitch_mask(
@@ -89,6 +103,7 @@ private:
     std::expected<void, std::string> open_playback(const void* device_id);
     struct Mix;
     struct PitchMask;
+    struct VerifyMix;
 
     void wake();
     void discard_ring();
@@ -100,6 +115,7 @@ private:
     void request_spectral_mask_rebuild();
     void mask_thread_main();
     bool spectral_cache_matches(const PitchMask& mask, const Stems* stems) const;
+    void reset_midi_synth();
     int read_source(int start, int frames, float* interleaved);
     int synthesize(float* interleaved, int frames);
     void arm_click(bool downbeat);

@@ -91,15 +91,24 @@ BT-Analyzer 是基於 Demucs 和 Basic Pitch 的轉譜工具，主要用來加�
 
 把 BS-RoFormer SW 的 ONNX 放到 `models/bs_roformer_sw.onnx`（`bs_roformer_sw_6stem_fp32.onnx` 或 `bs_roformer_sw_6stem_fp16.onnx` 也可以）。這個檔已在 `.gitignore`。`build.bat` 打分割檔時會把它放進去。圖的輸入是 `spec_real`、`spec_imag`，形狀 `[1, 2, 1025, T]`；輸出是 `out_spec_real`、`out_spec_imag`，形狀 `[1, 6, 2, 1025, T]`，`T` 必須固定。切塊長度是 `(T - 1) × 512`。和 UVR 同一套 588800 樣本切塊時，`T` 是 1151。
 
-本機已有 checkpoint 和對應的 yaml 時，用這支匯出，它不會下載權重：
+已裝 Python 3.11+ 時，一鍵裝依賴、下載缺少的權重並匯出全部 ONNX：
 
 ```bat
+export-onnx.bat
+```
+
+會抓轉譜 `nmp.onnx`、匯出 HTDemucs（demucs 自帶下載）、並從 Hugging Face 鏡像下載 `BS-Rofo-SW-Fixed.ckpt` / `.yaml`（約 700 MB，sha256 校驗）後匯出 BS-RoFormer。本機已有合格檔案會跳過下載。也可用 `--checkpoint` / `--config` 指定路徑，或 `--skip-download` 只用地端檔。產出為 `models/nmp.onnx`、`models/htdemucs_6s.onnx`、`models/bs_roformer_sw.onnx`、`models/bs_roformer_sw_fp16.onnx`。
+
+手動分步也行：
+
+```bat
+python tools/fetch_bs_roformer_sw.py
 python -m pip install -r requirements-bs-roformer-onnx.txt
 python -m bs_roformer_sw_onnx export models/bs_roformer_sw.onnx --checkpoint BS-Rofo-SW-Fixed.ckpt --config BS-Rofo-SW-Fixed.yaml
+python tools/fetch_nmp_onnx.py
 ```
 
 ```bat
-python tools/fetch_nmp_onnx.py
 build.bat
 ```
 

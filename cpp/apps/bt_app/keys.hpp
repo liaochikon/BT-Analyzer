@@ -25,7 +25,6 @@ enum class Action : int {
     NextTrack,
     ViewGuitar,
     ViewBass,
-    ViewRoll,
     ViewFall,
     AdjustSpeed,
     AdjustSeek,

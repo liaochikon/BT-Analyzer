@@ -121,6 +121,9 @@ add_library(bt_stem STATIC
   src/time_stretch.cpp
   src/player.cpp
   src/pitch_mask.cpp
+  src/midi_synth.cpp
+  src/note_score.cpp
+  src/harmonic_deghost.cpp
   src/beat_track.cpp
   src/project.cpp)
 target_include_directories(bt_stem PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -141,17 +144,19 @@ target_link_libraries(bt_stem PRIVATE bcrypt)
 
 set(BT_REPO_ROOT ${CMAKE_SOURCE_DIR}/..)
 
-set(BT_CUDA_EP ${CMAKE_BINARY_DIR}/cuda-ep)
-
 function(bt_copy_runtime target)
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ORT_DLL} $<TARGET_FILE_DIR:${target}>
     VERBATIM)
-  if(EXISTS ${BT_CUDA_EP})
-    add_custom_command(TARGET ${target} POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_directory ${BT_CUDA_EP} $<TARGET_FILE_DIR:${target}>
-      VERBATIM)
-  endif()
+  # Repo-root cuda-ep/ from fetch-cuda.bat (preferred), else legacy <build>/cuda-ep.
+  # Runs every build so a late fetch is picked up without reconfigure.
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+      -DBT_REPO_ROOT=${BT_REPO_ROOT}
+      -DBT_BUILD_DIR=${CMAKE_BINARY_DIR}
+      -DBT_DST_DIR=$<TARGET_FILE_DIR:${target}>
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_cuda_ep.cmake
+    VERBATIM)
   get_target_property(soxr_type soxr TYPE)
   if(soxr_type STREQUAL "SHARED_LIBRARY")
     add_custom_command(TARGET ${target} POST_BUILD
@@ -174,6 +179,16 @@ if(BT_DEV_TOOLS)
   target_link_libraries(bt-separate PRIVATE bt_stem)
   target_compile_options(bt-separate PRIVATE /W4 /permissive- /utf-8)
   bt_copy_runtime(bt-separate)
+
+  add_executable(bt-bach10-eval apps/bt_bach10_eval/main.cpp)
+  target_link_libraries(bt-bach10-eval PRIVATE bt_stem)
+  target_compile_options(bt-bach10-eval PRIVATE /W4 /permissive- /utf-8)
+  bt_copy_runtime(bt-bach10-eval)
+
+  add_executable(bt-babyslakh-eval apps/bt_babyslakh_eval/main.cpp)
+  target_link_libraries(bt-babyslakh-eval PRIVATE bt_stem)
+  target_compile_options(bt-babyslakh-eval PRIVATE /W4 /permissive- /utf-8)
+  bt_copy_runtime(bt-babyslakh-eval)
 endif()
 
 add_library(bt_imgui STATIC
@@ -195,6 +210,9 @@ configure_file(
 add_executable(bt-app WIN32
   apps/bt_app/main.cpp
   apps/bt_app/ui.cpp
+  apps/bt_app/icons.cpp
+  apps/bt_app/i18n.cpp
+  apps/bt_app/transport.cpp
   apps/bt_app/separate.cpp
   apps/bt_app/keys.cpp
   apps/bt_app/midi_view.cpp
@@ -215,15 +233,20 @@ if(BT_DEV_TOOLS)
     tests/test_session.cpp
     tests/test_player.cpp
     tests/test_notes.cpp
+    tests/test_note_score.cpp
+    tests/test_harmonic_deghost.cpp
     tests/test_beats.cpp
     tests/test_projects.cpp
     tests/test_runtime.cpp
     apps/bt_app/notes.cpp
     apps/bt_app/beats.cpp
     apps/bt_app/monitor.cpp
-    apps/bt_app/ui.cpp
+    apps/bt_app/i18n.cpp
+    apps/bt_app/transport.cpp
     apps/bt_app/separate.cpp
     apps/bt_app/keys.cpp
+    apps/bt_app/ui.cpp
+    apps/bt_app/icons.cpp
     apps/bt_app/midi_view.cpp)
   target_include_directories(bt_stem_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/apps/bt_app)
   target_link_libraries(bt_stem_tests PRIVATE bt_stem bt_imgui Catch2::Catch2WithMain d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi imm32)

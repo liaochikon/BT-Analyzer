@@ -373,3 +373,111 @@ TEST_CASE("spectral pitch mask removes out-of-band energy") {
     REQUIRE(energy(left, 100.f) < energy(mono, 100.f) * 0.2);
     REQUIRE(energy(left, 880.f) > energy(mono, 880.f) * 0.5);
 }
+
+namespace {
+
+float peak_abs(const std::vector<float>& interleaved) {
+    float peak = 0.f;
+    for (float sample : interleaved) {
+        peak = std::max(peak, std::fabs(sample));
+    }
+    return peak;
+}
+
+float rms_left(const std::vector<float>& interleaved) {
+    double sum = 0;
+    const int frames = static_cast<int>(interleaved.size() / 2);
+    for (int i = 0; i < frames; ++i) {
+        const double sample = interleaved[static_cast<std::size_t>(i * 2)];
+        sum += sample * sample;
+    }
+    return static_cast<float>(std::sqrt(sum / static_cast<double>(std::max(1, frames))));
+}
+
+double tone_energy_mono(const std::vector<float>& mono, float hz) {
+    double re = 0;
+    double im = 0;
+    for (int i = 0; i < static_cast<int>(mono.size()); ++i) {
+        const double phase =
+            2.0 * 3.141592653589793 * static_cast<double>(hz) * static_cast<double>(i) /
+            bt::kSampleRate;
+        re += static_cast<double>(mono[static_cast<std::size_t>(i)]) * std::cos(phase);
+        im += static_cast<double>(mono[static_cast<std::size_t>(i)]) * std::sin(phase);
+    }
+    return std::sqrt(re * re + im * im) / static_cast<double>(std::max<std::size_t>(1, mono.size()));
+}
+
+}  // namespace
+
+TEST_CASE("midi square synth keeps A4 energy") {
+    constexpr int kFrames = 44100;
+    std::vector<float> interleaved(static_cast<std::size_t>(kFrames * 2), 0.f);
+    bt::MidiSynthNote note{69, 0.0, 1.0, 100};
+    bt::MidiSynth synth;
+    synth.mix(interleaved.data(), kFrames, 0, 60, 76, 1.f, &note, 1);
+    std::vector<float> mono(static_cast<std::size_t>(kFrames));
+    for (int i = 0; i < kFrames; ++i) {
+        mono[static_cast<std::size_t>(i)] = interleaved[static_cast<std::size_t>(i * 2)];
+    }
+    REQUIRE(tone_energy_mono(mono, 440.f) > 0.05);
+    REQUIRE(peak_abs(interleaved) > 0.1f);
+}
+
+TEST_CASE("verify midi plays when original is muted") {
+    constexpr int kFrames = 44100;
+    auto stems = constant_song(kFrames, 0.5f, 0);
+    bt::Player player;
+    player.set_song(stems);
+    std::array<float, bt::kStemCount> gain{};
+    gain.fill(1.f);
+    player.set_mix(gain, {}, {});
+
+    auto notes = std::make_shared<std::vector<bt::MidiSynthNote>>();
+    notes->push_back(bt::MidiSynthNote{69, 0.0, 1.0, 100});
+
+    bt::Player::VerifyLane original;
+    original.mute = true;
+    bt::Player::VerifyLane midi;
+    midi.gain = 1.f;
+    player.set_verify_mix(0, original, midi, 60, 76, notes, 1);
+    player.play();
+
+    std::vector<float> output(static_cast<std::size_t>(kFrames * 2));
+    REQUIRE(player.render(output.data(), kFrames) == kFrames);
+    // WSOLA smears pure tones; assert audible energy and no dry DC stem.
+    REQUIRE(rms_left(output) > 0.02f);
+    REQUIRE(peak_abs(output) > 0.05f);
+    REQUIRE(std::fabs(output[20000 * 2] - 0.5f) > 0.2f);
+}
+
+TEST_CASE("verify main stem mute silences original and midi") {
+    constexpr int kFrames = 22050;
+    auto stems = constant_song(kFrames, 0.5f, 0);
+    bt::Player player;
+    player.set_song(stems);
+    std::array<float, bt::kStemCount> gain{};
+    gain.fill(1.f);
+    std::array<bool, bt::kStemCount> mute{};
+    player.set_mix(gain, mute, {});
+
+    auto notes = std::make_shared<std::vector<bt::MidiSynthNote>>();
+    notes->push_back(bt::MidiSynthNote{69, 0.0, 1.0, 100});
+
+    bt::Player::VerifyLane original;
+    original.mute = true;
+    bt::Player::VerifyLane midi;
+    player.set_verify_mix(0, original, midi, 60, 76, notes, 1);
+    player.play();
+    std::vector<float> midi_only(static_cast<std::size_t>(kFrames * 2));
+    REQUIRE(player.render(midi_only.data(), kFrames) == kFrames);
+    REQUIRE(rms_left(midi_only) > 0.02f);
+
+    mute[0] = true;
+    player.set_mix(gain, mute, {});
+    player.seek(0);
+    std::vector<float> muted(static_cast<std::size_t>(kFrames * 2));
+    REQUIRE(player.render(muted.data(), kFrames) == kFrames);
+    REQUIRE_THAT(muted[1000 * 2], Catch::Matchers::WithinAbs(0.0, 1e-5));
+    REQUIRE_THAT(muted[1000 * 2 + 1], Catch::Matchers::WithinAbs(0.0, 1e-5));
+    REQUIRE(rms_left(muted) < 1e-4f);
+}

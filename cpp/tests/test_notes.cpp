@@ -73,16 +73,27 @@ TEST_CASE("melodia keeps a sustained tone that has no onset") {
 
 TEST_CASE("stem parameters give bass a lower range and vocals the melodia step") {
     const auto bass = bt::pitch_parameters_for_stem(1);
+    const auto other = bt::pitch_parameters_for_stem(2);
     const auto guitar = bt::pitch_parameters_for_stem(4);
+    const auto piano = bt::pitch_parameters_for_stem(5);
     const auto vocals = bt::pitch_parameters_for_stem(3);
     REQUIRE(bass.maximum_frequency == 400.f);
     REQUIRE(guitar.maximum_frequency == 0.f);
     REQUIRE(bass.minimum_frequency == 30.f);
     REQUIRE_FALSE(guitar.melodia);
-    REQUIRE_FALSE(bt::pitch_parameters_for_stem(5).melodia);
-    REQUIRE_FALSE(bt::pitch_parameters_for_stem(2).melodia);
-    REQUIRE(bt::pitch_parameters_for_stem(2).maximum_frequency == 0.f);
+    REQUIRE_FALSE(piano.melodia);
+    REQUIRE_FALSE(other.melodia);
+    REQUIRE(other.maximum_frequency == 0.f);
+    REQUIRE_THAT(other.onset_threshold, Catch::Matchers::WithinAbs(0.20, 1e-6));
+    REQUIRE_THAT(other.frame_threshold, Catch::Matchers::WithinAbs(0.20, 1e-6));
     REQUIRE(vocals.melodia);
+    REQUIRE(bt::stem_skips_pitch(0));
+    REQUIRE_FALSE(bt::stem_skips_pitch(2));
+    REQUIRE_THAT(guitar.onset_threshold, Catch::Matchers::WithinAbs(0.30, 1e-6));
+    REQUIRE_THAT(guitar.frame_threshold, Catch::Matchers::WithinAbs(0.25, 1e-6));
+    REQUIRE_THAT(piano.onset_threshold, Catch::Matchers::WithinAbs(0.35, 1e-6));
+    REQUIRE_THAT(piano.frame_threshold, Catch::Matchers::WithinAbs(0.30, 1e-6));
+    REQUIRE_THAT(piano.minimum_note_ms, Catch::Matchers::WithinAbs(180.0, 1e-6));
 }
 
 TEST_CASE("the bundled model accepts one silent window") {

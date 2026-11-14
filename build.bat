@@ -13,18 +13,18 @@ if /I "%~1"=="Debug" (
   goto :configured
 )
 
-echo 用法：build.bat [Release^|Debug]
-echo Release 編譯可攜式程式，並打成 dist 裡每份 %PART_SIZE_MB% MB 的 7z 分割檔。
-echo 只留下 .7z.001、.7z.002……。用 7-Zip 開啟第一份即可解壓。
-echo 內容含程式、轉譜模型、找得到的分軌權重；有 cpp\build\cuda-ep 時含 CUDA。
-echo Debug 另外編譯命令列工具和測試，不打包。
+echo Usage: build.bat [Release^|Debug]
+echo Release builds the portable app and packs split 7z archives under dist\,
+echo each %PART_SIZE_MB% MB. Only .7z.001, .7z.002, ... remain; open the first part with 7-Zip.
+echo Contents: app, transcription model, any stem weights found; CUDA when cuda-ep\ exists ^(fetch-cuda.bat^).
+echo Debug also builds CLI tools and tests; it does not package.
 set "EXITCODE=1"
 goto :finish
 
 :configured
 where cmake >nul 2>&1
 if errorlevel 1 (
-  echo 找不到 cmake。
+  echo cmake not found.
   set "EXITCODE=1"
   goto :finish
 )
@@ -41,8 +41,8 @@ if errorlevel 1 goto :fail
 
 if /I not "%CONFIG%"=="Release" (
   echo.
-  echo Debug 編譯完成：cpp\build\Debug\bt-app.exe
-  echo 命令列工具和測試在同一個資料夾。這次沒有打包。
+  echo Debug build ready: cpp\build\Debug\bt-app.exe
+  echo CLI tools and tests are in the same folder. No package was created.
   goto :finish
 )
 
@@ -52,7 +52,7 @@ goto :finish
 
 :fail
 echo.
-echo 失敗。
+echo Failed.
 set "EXITCODE=1"
 
 :finish

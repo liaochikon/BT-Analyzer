@@ -3,7 +3,9 @@
 同一首歌用兩個模型各拆一次，專案列表會各有一列。
 
 設定裡可以選分軌模型和推論裝置。推論裝置有自動、CPU、CUDA。
-CUDA 需要這個資料夾裡有 onnxruntime_providers_cuda.dll。沒有的話請用 CPU。
+CUDA 需要這個資料夾裡有 onnxruntime_providers_cuda.dll，以及同目錄的 CUDA／cuDNN DLL
+（例如 cublasLt64_12.dll）。開發時在倉庫根目錄執行 fetch-cuda.bat，會寫入 cuda-ep\
+（ORT GPU 套件 + NVIDIA 執行階段）；建置與打包會自動帶上。沒有的話請用 CPU。
 專案列表第二行是這首歌當初用的模型和裝置。
 
 分軌權重在 models，已經跟 bt-app.exe 放在一起。

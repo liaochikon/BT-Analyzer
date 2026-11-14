@@ -1,5 +1,7 @@
 #include "separate.hpp"
 
+#include "i18n.hpp"
+
 #include "bt/contract.hpp"
 #include "bt/onnx_model.hpp"
 #include "bt/roformer.hpp"
@@ -36,9 +38,6 @@ std::filesystem::path find_asset(
     return find_up(cwd, relative);
 }
 
-const char* kRoformerMissing = "找不到 models/bs_roformer_sw.onnx。這份版本不附分軌權重。";
-const char* kDemucsMissing = "找不到 models/htdemucs_6s.onnx。";
-
 }  // namespace
 
 struct StemEngine::Loaded {
@@ -53,10 +52,10 @@ StemEngine::~StemEngine() = default;
 
 std::string model_label(std::string_view key) {
     if (key == "htdemucs_6s") {
-        return "HTDemucs 6s";
+        return std::string("HTDemucs 6s ") + t("model_tag_fast");
     }
     if (key == "bs_roformer_sw") {
-        return "BS-RoFormer SW";
+        return std::string("BS-RoFormer SW ") + t("model_tag_quality");
     }
     return std::string(key);
 }
@@ -115,7 +114,7 @@ void StemEngine::apply(std::string model_key, InferenceDevice device, int thread
 
     if (model_key == "htdemucs_6s") {
         if (htdemucs_.empty()) {
-            fail(kDemucsMissing);
+            fail("error.missing_htdemucs");
             return;
         }
         auto opened = bt::OnnxSegmentModel::open(htdemucs_, threads);
@@ -133,7 +132,7 @@ void StemEngine::apply(std::string model_key, InferenceDevice device, int thread
     }
 
     if (fp16_.empty() && fp32_.empty()) {
-        fail(kRoformerMissing);
+        fail("error.missing_roformer");
         return;
     }
     if (preference == static_cast<int>(InferenceDevice::Cuda)) {
@@ -172,13 +171,13 @@ std::expected<bt::Stems, std::string> StemEngine::separate(
         error = error_;
     }
     if (loaded == nullptr) {
-        return std::unexpected(error.empty() ? std::string(kRoformerMissing) : error);
+        return std::unexpected(error.empty() ? std::string("error.missing_roformer") : error);
     }
     if (loaded->roformer != nullptr) {
         return loaded->roformer->separate(audio, progress, cancelled);
     }
     if (loaded->demucs == nullptr) {
-        return std::unexpected(error.empty() ? std::string(kDemucsMissing) : error);
+        return std::unexpected(error.empty() ? std::string("error.missing_htdemucs") : error);
     }
     try {
         return bt::separate_audio(audio, loaded->demucs->runner(), {}, progress, cancelled);

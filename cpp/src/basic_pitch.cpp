@@ -180,10 +180,22 @@ std::vector<float> trim_window(const float* data, int time_count, int bins) {
 PitchParameters pitch_parameters_for_stem(int stem) {
     PitchParameters parameters;
     if (stem == 1) {
+        // Bass: keep the low register, drop guitar-range bleed.
         parameters.minimum_frequency = 30.f;
         parameters.maximum_frequency = 400.f;
     } else if (stem == 3) {
+        // Vocals: Melodia-style contour fill.
         parameters.melodia = true;
+    } else if (stem == 4) {
+        // Guitar: looser than sweep F-max (0.35 felt too strict); still above default 0.20.
+        parameters.onset_threshold = 0.30f;
+        parameters.frame_threshold = 0.25f;
+        parameters.minimum_note_ms = 127.7f;
+    } else if (stem == 5) {
+        // Piano: BabySlakh sweep winner (stricter onset/frame, drop short ghosts).
+        parameters.onset_threshold = 0.35f;
+        parameters.frame_threshold = 0.30f;
+        parameters.minimum_note_ms = 180.f;
     }
     return parameters;
 }
@@ -435,19 +447,18 @@ std::expected<BasicPitchModel, std::string> BasicPitchModel::open(const std::fil
     return attempt(ORT_ENABLE_BASIC);
 }
 
-std::expected<std::vector<Note>, std::string> BasicPitchModel::transcribe(
-    const float* samples, std::int64_t frames, const PitchParameters& parameters,
-    const std::function<void(float)>& progress, const std::function<bool()>& cancelled) const {
+std::expected<PitchActivationBuffer, std::string> BasicPitchModel::infer_activations(
+    const float* samples, std::int64_t frames, const std::function<void(float)>& progress,
+    const std::function<bool()>& cancelled) const {
+    PitchActivationBuffer buffer;
     if (samples == nullptr || frames <= 0) {
-        return std::vector<Note>{};
+        return buffer;
     }
     const std::int64_t padded_length = frames + kOverlapSamples / 2;
     int windows = 0;
     for (std::int64_t cursor = 0; cursor < padded_length; cursor += kHopSamples) {
         ++windows;
     }
-    std::vector<float> note_kept;
-    std::vector<float> onset_kept;
     std::vector<float> window(static_cast<std::size_t>(kAudioSamples), 0.f);
     const char* input_names[] = {"serving_default_input_2:0"};
     const char* output_names[] = {"StatefulPartitionedCall:1", "StatefulPartitionedCall:2"};
@@ -509,10 +520,10 @@ std::expected<std::vector<Note>, std::string> BasicPitchModel::transcribe(
             destination.insert(destination.end(), kept.begin(), kept.end());
             return {};
         };
-        if (auto copied = copy_output(note_value.value, note_kept); !copied) {
+        if (auto copied = copy_output(note_value.value, buffer.note); !copied) {
             return std::unexpected(copied.error());
         }
-        if (auto copied = copy_output(onset_value.value, onset_kept); !copied) {
+        if (auto copied = copy_output(onset_value.value, buffer.onset); !copied) {
             return std::unexpected(copied.error());
         }
         ++done;
@@ -521,14 +532,28 @@ std::expected<std::vector<Note>, std::string> BasicPitchModel::transcribe(
         }
     }
 
-    const int kept_frames = static_cast<int>(note_kept.size() / static_cast<std::size_t>(kBins));
+    const int kept_frames = static_cast<int>(buffer.note.size() / static_cast<std::size_t>(kBins));
     const double expected_windows = static_cast<double>(frames) / static_cast<double>(kHopSamples);
     const int frames_per_window = kWindowFrames - kOverlapFrames;
     const int keep = std::min(kept_frames, static_cast<int>(expected_windows * static_cast<double>(frames_per_window)));
-    if (keep <= 0 || onset_kept.size() < note_kept.size()) {
-        return std::vector<Note>{};
+    if (keep <= 0 || buffer.onset.size() < buffer.note.size()) {
+        buffer = {};
+        return buffer;
     }
-    return notes_from_activations(PitchActivations{keep, note_kept.data(), onset_kept.data()}, parameters);
+    buffer.frames = keep;
+    buffer.note.resize(static_cast<std::size_t>(keep) * static_cast<std::size_t>(kBins));
+    buffer.onset.resize(static_cast<std::size_t>(keep) * static_cast<std::size_t>(kBins));
+    return buffer;
+}
+
+std::expected<std::vector<Note>, std::string> BasicPitchModel::transcribe(
+    const float* samples, std::int64_t frames, const PitchParameters& parameters,
+    const std::function<void(float)>& progress, const std::function<bool()>& cancelled) const {
+    auto activations = infer_activations(samples, frames, progress, cancelled);
+    if (!activations) {
+        return std::unexpected(activations.error());
+    }
+    return notes_from_activations(activations->view(), parameters);
 }
 
 std::expected<std::vector<float>, std::string> stem_to_basic_pitch_audio(const std::vector<float>& channel_major, std::int64_t frames) {

@@ -1,7 +1,7 @@
 #include "beats.hpp"
 
 #include "monitor.hpp"
-#include "ui.hpp"
+#include "app_state.hpp"
 
 #include "bt/contract.hpp"
 
@@ -206,13 +206,13 @@ void sync_beats(App& app, const std::shared_ptr<const bt::SongSnapshot>& song) {
             app.beat_pending = false;
             if (result.cancelled) {
                 app.beat_ready = false;
-                log_phrase(LogLevel::Warn, app.language, "拍點已取消", "拍点已取消", "Beat tracking cancelled");
+                log_phrase(LogLevel::Warn, "log.beat_cancelled");
                 continue;
             }
             app.beat_ready = true;
             if (!result.error.empty() || !(result.grid.bpm > 0.f)) {
                 app.beat_detail = result.error.empty() ? "no beats" : result.error;
-                log_phrase(LogLevel::Error, app.language, "拍點失敗", "拍点失败", "Beat tracking failed", " · " + app.beat_detail);
+                log_phrase(LogLevel::Error, "log.beat_failed", " · " + app.beat_detail);
                 continue;
             }
             app.beat_detail.clear();
@@ -220,7 +220,7 @@ void sync_beats(App& app, const std::shared_ptr<const bt::SongSnapshot>& song) {
             std::snprintf(
                 summary, sizeof summary, " · %.1f BPM  +%.2fs · %zu", static_cast<double>(result.grid.bpm), result.grid.offset,
                 result.grid.times.size());
-            log_phrase(LogLevel::Info, app.language, "拍點完成", "拍点完成", "Beats ready", summary);
+            log_phrase(LogLevel::Info, "log.beat_done", summary);
             if (!result.grid.times.empty()) {
                 app.beat_times = std::make_shared<const std::vector<double>>(result.grid.times);
             } else {
@@ -241,7 +241,7 @@ void sync_beats(App& app, const std::shared_ptr<const bt::SongSnapshot>& song) {
     app.beat_pending = true;
     app.beat_ticket = app.beat_service->request(song->job, song->cache_directory / "beats.txt", song, refresh);
     app.beat_ready = true;
-    log_phrase(LogLevel::Info, app.language, "拍點偵測開始", "拍点检测开始", "Beat tracking started");
+    log_phrase(LogLevel::Info, "log.beat_start");
 }
 
 void rerun_beats(App& app) {

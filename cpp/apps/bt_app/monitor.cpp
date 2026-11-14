@@ -1,5 +1,7 @@
 #include "monitor.hpp"
 
+#include "i18n.hpp"
+
 #include "ui.hpp"
 
 #include "separate.hpp"
@@ -57,24 +59,8 @@ bt::SongPhase seen_phase = bt::SongPhase::Empty;
 std::string seen_detail;
 bool seen_ready = false;
 
-const char* pick(int language, const char* hant, const char* hans, const char* en) {
-    if (language == 2) {
-        return en;
-    }
-    if (language == 1) {
-        return hans;
-    }
-    return hant;
-}
-
 const char* stem_name(int stem, int language) {
-    static const char* hant[] = {"鼓", "貝斯", "其他", "人聲", "吉他", "鋼琴"};
-    static const char* hans[] = {"鼓", "贝斯", "其他", "人声", "吉他", "钢琴"};
-    static const char* en[] = {"Drums", "Bass", "Other", "Vocals", "Guitar", "Piano"};
-    if (stem < 0 || stem >= bt::kStemCount) {
-        return "";
-    }
-    return pick(language, hant[stem], hans[stem], en[stem]);
+    return stem_label(stem, language);
 }
 
 std::string utf8_from_wide(std::wstring_view wide) {
@@ -195,25 +181,30 @@ std::string bytes_text(unsigned long long bytes) {
     return buffer;
 }
 
-void meter(float fraction, const char* overlay) {
-    const ImVec4 color = fraction >= 0.9f ? ImVec4(0.773f, 0.361f, 0.333f, 1.f)
-                         : fraction >= 0.7f ? ImVec4(0.804f, 0.725f, 0.388f, 1.f)
-                                            : ImVec4(0.329f, 0.710f, 0.349f, 1.f);
-    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, color);
-    ImGui::ProgressBar(std::clamp(fraction, 0.f, 1.f), ImVec2(-1.f, 0.f), overlay);
-    ImGui::PopStyleColor();
+ImU32 meter_fill(float fraction) {
+    if (fraction >= 0.9f) {
+        return IM_COL32(197, 92, 85, 255);
+    }
+    if (fraction >= 0.7f) {
+        return IM_COL32(205, 185, 99, 255);
+    }
+    return IM_COL32(84, 181, 89, 255);
+}
+
+void meter(const char* id, float fraction, const char* overlay) {
+    ProgressBar(id, fraction).overlay(overlay).fill(meter_fill(fraction)).draw();
 }
 
 const char* note_state_text(NoteStatus status, int language) {
     switch (status) {
     case NoteStatus::Running:
-        return pick(language, "轉譜中", "转谱中", "Running");
+        return t("note.running");
     case NoteStatus::Ready:
-        return pick(language, "完成", "完成", "Ready");
+        return t("note.ready");
     case NoteStatus::Failed:
-        return pick(language, "失敗", "失败", "Failed");
+        return t("note.failed");
     case NoteStatus::Idle:
-        return pick(language, "閒置", "闲置", "Idle");
+        return t("note.idle");
     }
     return "";
 }
@@ -235,17 +226,17 @@ ImVec4 note_state_color(NoteStatus status) {
 const char* phase_label(bt::SongPhase phase, bool from_cache, int language) {
     switch (phase) {
     case bt::SongPhase::Empty:
-        return pick(language, "沒有歌曲", "没有歌曲", "No song");
+        return t("phase.no_song");
     case bt::SongPhase::Decoding:
-        return pick(language, "解碼中", "解码中", "Decoding");
+        return t("phase.decoding");
     case bt::SongPhase::Separating:
-        return pick(language, "分離中", "分离中", "Separating");
+        return t("phase.separating");
     case bt::SongPhase::Ready:
-        return from_cache ? pick(language, "就緒 · 快取", "就绪 · 缓存", "Ready · cache") : pick(language, "就緒", "就绪", "Ready");
+        return from_cache ? t("phase.ready_cache") : t("phase.ready");
     case bt::SongPhase::Cancelled:
-        return pick(language, "已取消", "已取消", "Cancelled");
+        return t("phase.cancelled");
     case bt::SongPhase::Failed:
-        return pick(language, "失敗", "失败", "Failed");
+        return t("note.failed");
     }
     return "";
 }
@@ -269,24 +260,22 @@ void log_phase(int language, const bt::SongSnapshot& song) {
     std::string tail = name.empty() ? std::string{} : " · " + name;
     switch (song.phase) {
     case bt::SongPhase::Decoding:
-        log_phrase(LogLevel::Info, language, "開啟歌曲", "打开歌曲", "Open song", tail);
+        log_phrase(LogLevel::Info, "log.open_song", tail);
         break;
     case bt::SongPhase::Separating:
-        log_phrase(LogLevel::Info, language, "開始分離", "开始分离", "Separating", tail);
+        log_phrase(LogLevel::Info, "log.separating", tail);
         break;
     case bt::SongPhase::Ready:
-        log_phrase(
-            LogLevel::Info, language, song.from_cache ? "歌曲就緒 · 快取" : "歌曲就緒", song.from_cache ? "歌曲就绪 · 缓存" : "歌曲就绪",
-            song.from_cache ? "Song ready · cache" : "Song ready", tail);
+        log_phrase(LogLevel::Info, song.from_cache ? "log.song_ready_cache" : "log.song_ready", tail);
         break;
     case bt::SongPhase::Cancelled:
-        log_phrase(LogLevel::Warn, language, "分離已取消", "分离已取消", "Separation cancelled", tail);
+        log_phrase(LogLevel::Warn, "log.separation_cancelled", tail);
         break;
     case bt::SongPhase::Failed:
-        log_phrase(LogLevel::Error, language, "歌曲失敗", "歌曲失败", "Song failed", song.detail.empty() ? tail : " · " + song.detail);
+        log_phrase(LogLevel::Error, "log.song_failed", song.detail.empty() ? tail : " · " + song.detail);
         break;
     case bt::SongPhase::Empty:
-        log_phrase(LogLevel::Info, language, "已關閉歌曲", "已关闭歌曲", "Song closed");
+        log_phrase(LogLevel::Info, "log.song_closed");
         break;
     }
 }
@@ -294,15 +283,15 @@ void log_phase(int language, const bt::SongSnapshot& song) {
 void draw_machine(int language) {
     ensure_machine();
     sample_cpu();
-    ImGui::SeparatorText(pick(language, "本機", "本机", "Machine"));
+    ImGui::SeparatorText(t("monitor.machine"));
     if (!computer.empty()) {
         ImGui::TextUnformatted(computer.c_str());
     }
     char overlay[64];
-    std::snprintf(overlay, sizeof overlay, "%s  %.0f%%", pick(language, "程序", "进程", "App"), cpu.process * 100.f);
-    meter(cpu.process, overlay);
-    std::snprintf(overlay, sizeof overlay, "%s  %.0f%%", pick(language, "系統", "系统", "System"), cpu.system * 100.f);
-    meter(cpu.system, overlay);
+    std::snprintf(overlay, sizeof overlay, "%s  %.0f%%", t("monitor.app"), cpu.process * 100.f);
+    meter("cpu-app", cpu.process, overlay);
+    std::snprintf(overlay, sizeof overlay, "%s  %.0f%%", t("monitor.system"), cpu.system * 100.f);
+    meter("cpu-sys", cpu.system, overlay);
 
     MEMORYSTATUSEX memory{};
     memory.dwLength = sizeof memory;
@@ -319,37 +308,38 @@ void draw_machine(int language) {
         working = process.WorkingSetSize;
     }
     const float ram = total > 0 ? static_cast<float>(static_cast<double>(used) / static_cast<double>(total)) : 0.f;
-    std::snprintf(overlay, sizeof overlay, "%s %s / %s", pick(language, "記憶體", "内存", "Memory"), bytes_text(used).c_str(), bytes_text(total).c_str());
-    meter(ram, overlay);
+    std::snprintf(overlay, sizeof overlay, "%s %s / %s", t("monitor.memory"), bytes_text(used).c_str(), bytes_text(total).c_str());
+    meter("ram", ram, overlay);
     ImGui::TextDisabled(
-        "%s %s    %s %d    %.0f fps", pick(language, "程序", "进程", "App"), bytes_text(working).c_str(),
-        pick(language, "核心", "核心", "Cores"), processors, static_cast<double>(ImGui::GetIO().Framerate));
+        "%s %s    %s %d    %.0f fps", t("monitor.app"), bytes_text(working).c_str(),
+        t("monitor.cores"), processors, static_cast<double>(ImGui::GetIO().Framerate));
 }
 
 void draw_song(const App& app, const bt::SongSnapshot& song, const bt::Player::Snapshot& transport) {
     const int language = app.language;
-    ImGui::SeparatorText(pick(language, "歌曲", "歌曲", "Song"));
+    ImGui::SeparatorText(t("monitor.song"));
     const std::string name = song.project_name.empty() ? utf8_from_path(song.source.filename()) : song.project_name;
-    ImGui::TextUnformatted(name.empty() ? pick(language, "沒有歌曲", "没有歌曲", "No song") : name.c_str());
-    ImGui::TextDisabled("%s", phase_label(song.phase, song.from_cache, language));
+    ImGui::TextUnformatted(name.empty() ? t("phase.no_song") : name.c_str());
     if (song.phase == bt::SongPhase::Decoding || song.phase == bt::SongPhase::Separating) {
         const float fraction = song.phase == bt::SongPhase::Separating ? song.progress : 0.f;
         char overlay[64];
         std::snprintf(
             overlay, sizeof overlay, "%s  %.0f%%", phase_label(song.phase, song.from_cache, language),
             std::clamp(fraction, 0.f, 1.f) * 100.f);
-        ProgressBar("separate", fraction).overlay(overlay).draw();
+        ProgressBar("mon-separate", fraction).overlay(overlay).draw();
+    } else {
+        ImGui::TextDisabled("%s", phase_label(song.phase, song.from_cache, language));
     }
     const int position = static_cast<int>(transport.position);
     const int length = static_cast<int>(transport.length);
     ImGui::TextDisabled(
-        "%s    %d:%02d / %d:%02d    %.1fx", transport.playing ? pick(language, "播放", "播放", "Playing") : pick(language, "停止", "停止", "Stopped"),
+        "%s    %d:%02d / %d:%02d    %.1fx", transport.playing ? t("monitor.playing") : t("monitor.stopped"),
         position / 60, position % 60, length / 60, length % 60, transport.speed);
 }
 
 void draw_jobs(const App& app) {
     const int language = app.language;
-    ImGui::SeparatorText(pick(language, "工作", "工作", "Jobs"));
+    ImGui::SeparatorText(t("monitor.jobs"));
     bool notes_running = false;
     if (ImGui::BeginTable("jobs", 2, ImGuiTableFlags_SizingStretchProp)) {
         for (int stem = 0; stem < bt::kStemCount; ++stem) {
@@ -357,7 +347,7 @@ void draw_jobs(const App& app) {
             notes_running = notes_running || status == NoteStatus::Running;
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(stem_name(stem, language));
+            ImGui::TextUnformatted(stem_label(stem));
             ImGui::TableSetColumnIndex(1);
             ImGui::TextColored(note_state_color(status), "%s", note_state_text(status, language));
             if (status == NoteStatus::Failed && !app.note_detail[static_cast<std::size_t>(stem)].empty()) {
@@ -368,29 +358,20 @@ void draw_jobs(const App& app) {
         ImGui::EndTable();
     }
     if (notes_running) {
+        const float fraction = std::clamp(app.note_progress, 0.f, 1.f);
         char overlay[64];
-        std::snprintf(
-            overlay, sizeof overlay, "%s  %.0f%%", pick(language, "轉譜中", "转谱中", "Transcribing"),
-            std::clamp(app.note_progress, 0.f, 1.f) * 100.f);
-        ProgressBar("notes", app.note_progress).overlay(overlay).draw();
+        std::snprintf(overlay, sizeof overlay, "%s  %.0f%%", t("monitor.transcribing"), fraction * 100.f);
+        ProgressBar("mon-notes", fraction).overlay(overlay).draw();
     }
-    if (app.player != nullptr && app.player->pitch_mask_building()) {
-        const float fraction = app.player->pitch_mask_progress();
-        char overlay[64];
-        std::snprintf(
-            overlay, sizeof overlay, "%s  %.0f%%", pick(language, "遮罩中", "遮罩中", "Masking"),
-            std::clamp(fraction, 0.f, 1.f) * 100.f);
-        ProgressBar("pitch-mask", fraction).overlay(overlay).draw();
-    }
-    const char* beat = pick(language, "閒置", "闲置", "Idle");
+    const char* beat = t("note.idle");
     if (app.beat_pending) {
-        beat = pick(language, "偵測中", "检测中", "Detecting");
+        beat = t("monitor.detecting");
     } else if (!app.beat_detail.empty()) {
         beat = app.beat_detail.c_str();
     } else if (app.beat_ticket != 0) {
-        beat = pick(language, "完成", "完成", "Ready");
+        beat = t("note.ready");
     }
-    ImGui::TextDisabled("%s", pick(language, "拍點", "拍点", "Beats"));
+    ImGui::TextDisabled("%s", t("monitor.beats"));
     ImGui::SameLine();
     if (app.beat_pending) {
         ImGui::TextColored(ImVec4(0.804f, 0.725f, 0.388f, 1.f), "%s", beat);
@@ -404,20 +385,20 @@ void draw_jobs(const App& app) {
         }
     }
     if (!app.device_note.empty()) {
-        ImGui::TextColored(ImVec4(0.804f, 0.725f, 0.388f, 1.f), "%s", app.device_note.c_str());
+        ImGui::TextColored(ImVec4(0.804f, 0.725f, 0.388f, 1.f), "%s", stored(app.device_note));
     }
     if (!app.model_note.empty()) {
-        ImGui::TextColored(ImVec4(0.804f, 0.725f, 0.388f, 1.f), "%s", app.model_note.c_str());
+        ImGui::TextColored(ImVec4(0.804f, 0.725f, 0.388f, 1.f), "%s", stored(app.model_note));
     }
     if (!app.pitch_ready) {
-        const char* pitch = app.pitch_note.empty() ? "models/nmp.onnx" : app.pitch_note.c_str();
+        const char* pitch = app.pitch_note.empty() ? "models/nmp.onnx" : stored(app.pitch_note);
         ImGui::TextColored(ImVec4(0.773f, 0.361f, 0.333f, 1.f), "%s", pitch);
     }
 }
 
 void draw_log(int language) {
-    ImGui::SeparatorText(pick(language, "紀錄", "记录", "Log"));
-    if (MediumButton("clear-log", Icon::Clear).tip(pick(language, "清除畫面", "清除画面", "Clear view")).draw()) {
+    ImGui::SeparatorText(t("monitor.log"));
+    if (MediumButton("clear-log", Icon::Clear).tip(t("monitor.clear_view")).draw()) {
         std::lock_guard lock(gate);
         lines.clear();
     }
@@ -446,7 +427,7 @@ void draw_log(int language) {
         }
     }
     if (ImGui::BeginPopupContextItem("monitor-log-menu")) {
-        if (ImGui::MenuItem(pick(language, "複製全部", "复制全部", "Copy all"))) {
+        if (ImGui::MenuItem(t("monitor.copy_all"))) {
             ImGui::SetClipboardText(text.c_str());
         }
         ImGui::EndPopup();
@@ -471,24 +452,24 @@ void log_message(LogLevel level, std::string text) {
     remember(level, stamped);
 }
 
-void log_phrase(LogLevel level, int language, const char* hant, const char* hans, const char* en, const std::string& tail) {
-    log_message(level, std::string(pick(language, hant, hans, en)) + tail);
+void log_phrase(LogLevel level, std::string_view key, const std::string& tail) {
+    log_message(level, std::string(t(key)) + tail);
 }
 
-void log_stem(LogLevel level, int language, int stem, const char* hant, const char* hans, const char* en, const std::string& tail) {
-    log_message(level, std::string(pick(language, hant, hans, en)) + " · " + stem_name(stem, language) + tail);
+void log_stem(LogLevel level, int stem, std::string_view key, const std::string& tail) {
+    log_message(level, std::string(t(key)) + " · " + stem_label(stem) + tail);
 }
 
 void log_startup(const App& app) {
-    log_phrase(LogLevel::Info, app.language, "啟動", "启动", "Started");
+    log_phrase(LogLevel::Info, "log.started");
     if (app.device_note.empty()) {
-        log_phrase(LogLevel::Info, app.language, "播放裝置就緒", "播放设备就绪", "Playback device ready");
+        log_phrase(LogLevel::Info, "log.playback_ready");
     } else {
         log_message(LogLevel::Warn, app.device_note);
     }
     if (app.model_note.empty()) {
         log_phrase(
-            LogLevel::Info, app.language, "分離模型就緒", "分离模型就绪", "Separation model ready",
+            LogLevel::Info, "log.separation_model_ready",
             [&] {
                 std::string suffix = " · " + model_label(app.separation_model);
                 if (!app.separation_device.empty()) {
@@ -500,14 +481,14 @@ void log_startup(const App& app) {
                 return suffix;
             }());
     } else {
-        log_message(LogLevel::Warn, app.model_note);
+        log_message(LogLevel::Warn, stored(app.model_note));
     }
     if (app.pitch_ready) {
-        log_phrase(LogLevel::Info, app.language, "轉譜模型就緒", "转谱模型就绪", "Transcription model ready");
+        log_phrase(LogLevel::Info, "log.transcription_model_ready");
     } else if (!app.pitch_note.empty()) {
-        log_message(LogLevel::Warn, app.pitch_note);
+        log_message(LogLevel::Warn, stored(app.pitch_note));
     } else {
-        log_phrase(LogLevel::Warn, app.language, "找不到 models/nmp.onnx", "找不到 models/nmp.onnx", "models/nmp.onnx was not found");
+        log_phrase(LogLevel::Warn, "log.missing_nmp");
     }
     log_message(LogLevel::Info, utf8_from_path(log_path));
 }
@@ -539,7 +520,7 @@ void draw_monitor(App& app) {
     ImGui::SetNextWindowBgAlpha(0.96f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.f * scale, 10.f * scale));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.f * scale);
-    const std::string title = std::string(pick(app.language, "系統監控", "系统监控", "Monitor")) + "###monitor";
+    const std::string title = std::string(t("monitor.title")) + "###monitor";
     const bool open = ImGui::Begin(title.c_str(), &app.monitor_open);
     if (open) {
         draw_machine(app.language);

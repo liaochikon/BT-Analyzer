@@ -5,19 +5,19 @@
 
 $ErrorActionPreference = 'Stop'
 if ($PartSizeMB -lt 1) {
-    throw "PartSizeMB 必須是正整數，目前是 $PartSizeMB。"
+    throw "PartSizeMB must be a positive integer, got $PartSizeMB."
 }
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $versionPath = Join-Path $RepoRoot 'VERSION'
 $version = (Get-Content -LiteralPath $versionPath -Raw).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') {
-    throw "VERSION 必須是主版.次版.修訂，目前是「$version」。"
+    throw "VERSION must be major.minor.patch, got '$version'."
 }
 
 $weights = Join-Path $RepoRoot 'models\bs_roformer_sw.onnx'
 if (-not (Test-Path -LiteralPath $weights)) {
-    throw '打包缺少 models\bs_roformer_sw.onnx。'
+    throw 'Packaging requires models\bs_roformer_sw.onnx.'
 }
 
 $built = Join-Path $RepoRoot 'cpp\build\Release'
@@ -31,17 +31,17 @@ $required = @(
 foreach ($relative in $required) {
     $path = Join-Path $built $relative
     if (-not (Test-Path -LiteralPath $path)) {
-        throw "打包缺少 $relative。Release 需要編譯完成，而且專案根目錄要有 models 和 fonts。"
+        throw "Packaging is missing $relative. Finish a Release build and keep models and fonts under the repo root."
     }
 }
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path -LiteralPath $vswhere)) {
-    throw '找不到 vswhere，無法附上 Visual C++ 執行階段。'
+    throw 'vswhere not found; cannot attach the Visual C++ runtime.'
 }
 $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (-not $install) {
-    throw '找不到 Visual Studio 的 VC++ 工具。'
+    throw 'Visual Studio VC++ tools not found.'
 }
 $crt = Get-ChildItem -LiteralPath (Join-Path $install 'VC\Redist\MSVC') -Directory |
     Sort-Object Name -Descending |
@@ -51,7 +51,7 @@ $crt = Get-ChildItem -LiteralPath (Join-Path $install 'VC\Redist\MSVC') -Directo
     } |
     Select-Object -First 1
 if (-not $crt) {
-    throw '找不到 Microsoft.VC143.CRT。'
+    throw 'Microsoft.VC143.CRT not found.'
 }
 
 $ort = Join-Path $RepoRoot 'cpp\build\onnxruntime-win-x64-1.31.0'
@@ -65,7 +65,7 @@ foreach ($path in @(
         $imgui,
         (Join-Path $RepoRoot 'LICENSE'))) {
     if (-not (Test-Path -LiteralPath $path)) {
-        throw "打包缺少授權檔：$path"
+        throw "Packaging is missing license file: $path"
     }
 }
 
@@ -85,7 +85,7 @@ foreach ($candidate in @(
     }
 }
 if (-not $sevenZip) {
-    throw '找不到 7z.exe。打包分割檔需要安裝 7-Zip。'
+    throw '7z.exe not found. Install 7-Zip to build split archives.'
 }
 
 if (Test-Path -LiteralPath $stage) {
@@ -104,6 +104,7 @@ if (Test-Path -LiteralPath $dist) {
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'models') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'fonts') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'locales') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'licenses') | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $built 'bt-app.exe') -Destination $stage
@@ -119,16 +120,29 @@ foreach ($optional in @(
         Copy-Item -LiteralPath $source -Destination (Join-Path $stage 'models')
     }
 }
-$cudaEp = Join-Path $RepoRoot 'cpp\build\cuda-ep'
-$cudaProvider = Join-Path $cudaEp 'onnxruntime_providers_cuda.dll'
-$packedCuda = Test-Path -LiteralPath $cudaProvider
+# Prefer repo-root cuda-ep from fetch-cuda.bat; fall back to legacy build/cuda-ep.
+$cudaEpCandidates = @(
+    (Join-Path $RepoRoot 'cuda-ep'),
+    (Join-Path $RepoRoot 'cpp\build\cuda-ep')
+)
+$cudaEp = $null
+foreach ($candidate in $cudaEpCandidates) {
+    if (Test-Path -LiteralPath (Join-Path $candidate 'onnxruntime_providers_cuda.dll')) {
+        $cudaEp = $candidate
+        break
+    }
+}
+$packedCuda = $null -ne $cudaEp
 if ($packedCuda) {
-    # This onnxruntime.dll matches the CUDA provider. CPU graphs still run on it.
+    # GPU package onnxruntime.dll matches the CUDA provider. CPU graphs still run on it.
     Get-ChildItem -LiteralPath $cudaEp -Filter '*.dll' | Copy-Item -Destination $stage
 } else {
     Copy-Item -LiteralPath (Join-Path $ort 'lib\onnxruntime.dll') -Destination $stage
 }
 Copy-Item -LiteralPath (Join-Path $built 'fonts\sarasa-gothic-tc-nerd-merged.ttf') -Destination (Join-Path $stage 'fonts')
+foreach ($locale in @('zh-Hant.txt', 'zh-Hans.txt', 'en.txt')) {
+    Copy-Item -LiteralPath (Join-Path $built "locales\$locale") -Destination (Join-Path $stage 'locales')
+}
 Get-ChildItem -LiteralPath $crt -Filter '*.dll' | Copy-Item -Destination $stage
 
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'LICENSE') -Destination (Join-Path $stage 'LICENSE.txt')
@@ -148,7 +162,7 @@ foreach ($doc in @('USAGE.txt', 'THIRD_PARTY_LICENSES.txt')) {
 }
 
 if ((Test-Path -LiteralPath (Join-Path $stage 'saves')) -or (Test-Path -LiteralPath (Join-Path $stage 'cache'))) {
-    throw 'saves 或 cache 不該進壓縮檔。'
+    throw 'saves or cache must not be included in the archive.'
 }
 
 $archive = Join-Path $dist "$name.7z"
@@ -157,7 +171,7 @@ try {
     # The folder name is stored as the archive root, so extract yields one directory.
     & $sevenZip a "-t7z" "-mx=1" "-v${PartSizeMB}m" "-y" "--" $archive $name
     if ($LASTEXITCODE -ne 0) {
-        throw "7-Zip 打包失敗，退出碼 $LASTEXITCODE。"
+        throw "7-Zip packaging failed with exit code $LASTEXITCODE."
     }
 } finally {
     Pop-Location
@@ -168,7 +182,7 @@ $parts = @(Get-ChildItem -LiteralPath $dist -File |
     Where-Object { $_.Name -like "$name.7z.*" } |
     Sort-Object Name)
 if ($parts.Count -lt 1) {
-    throw '分割失敗，沒有產生分割檔。'
+    throw 'Split failed; no archive parts were produced.'
 }
 $extras = @(Get-ChildItem -LiteralPath $dist -Force |
     Where-Object {
@@ -179,20 +193,20 @@ $extras = @(Get-ChildItem -LiteralPath $dist -Force |
         $_.Name -like "$name.zip.*"
     })
 if ($extras.Count -gt 0) {
-    throw ('分割檔以外還留著：' + (($extras | ForEach-Object { $_.Name }) -join ', '))
+    throw ('Leftover files besides split parts: ' + (($extras | ForEach-Object { $_.Name }) -join ', '))
 }
 $limit = ([int64]$PartSizeMB * 1MB) + 1MB
 for ($i = 0; $i -lt ($parts.Count - 1); $i++) {
     if ($parts[$i].Length -gt $limit) {
-        throw "分割檔 $($parts[$i].Name) 大於 $PartSizeMB MB。"
+        throw "Split part $($parts[$i].Name) is larger than $PartSizeMB MB."
     }
 }
 
 Write-Host ''
 if ($packedCuda) {
-    Write-Host '已附上 CUDA 執行階段（cpp\build\cuda-ep）。沒有 NVIDIA 顯示卡時，設定裡改用 CPU。'
+    Write-Host "CUDA runtime included ($cudaEp). Use CPU in settings when no NVIDIA GPU is present."
 } else {
-    Write-Host '沒有 cpp\build\cuda-ep，這份 release 只用 CPU 分軌。'
+    Write-Host 'No cuda-ep\; this release runs stem separation on CPU only. Run fetch-cuda.bat to add it.'
 }
-Write-Host "可上傳的分割檔只有這些。用 7-Zip 開啟第一份即可解壓，每份 $PartSizeMB MB："
+Write-Host "Upload these split parts only. Open the first with 7-Zip to extract. Each part is $PartSizeMB MB:"
 foreach ($part in $parts) { Write-Host $part.FullName }

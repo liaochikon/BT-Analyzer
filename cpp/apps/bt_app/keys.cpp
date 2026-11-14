@@ -1,6 +1,9 @@
 #include "keys.hpp"
 
-#include "ui.hpp"
+#include "i18n.hpp"
+
+#include "app_state.hpp"
+#include "transport.hpp"
 
 #include "imgui.h"
 
@@ -74,8 +77,6 @@ const char* action_id(Action action) {
         return "view_guitar";
     case Action::ViewBass:
         return "view_bass";
-    case Action::ViewRoll:
-        return "view_roll";
     case Action::ViewFall:
         return "view_fall";
     case Action::AdjustSpeed:
@@ -207,22 +208,6 @@ void apply_mute_or_solo(App& app, bool solo) {
     }
 }
 
-void start_or_pause_transport(App& app, const bt::Player::Snapshot& transport) {
-    if (transport.playing) {
-        app.player->pause();
-        return;
-    }
-    if (transport.counting) {
-        app.player->play();
-        return;
-    }
-    if (app.count_in) {
-        app.player->count_in(4);
-        return;
-    }
-    app.player->play();
-}
-
 }  // namespace
 
 bool reserved_chord(const KeyChord& chord) {
@@ -254,135 +239,78 @@ bool reserved_chord(const KeyChord& chord) {
 }
 
 const char* action_label(Action action, int language) {
-    const char* hant = "";
-    const char* hans = "";
-    const char* en = "";
+    const char* key = "";
     switch (action) {
     case Action::PlayPause:
-        hant = "播放／暫停";
-        hans = "播放／暂停";
-        en = "Play / Pause";
+        key = "action.play_pause";
         break;
     case Action::Stop:
-        hant = "停止";
-        hans = "停止";
-        en = "Stop";
+        key = "action.stop";
         break;
     case Action::SeekBack:
-        hant = "後退";
-        hans = "后退";
-        en = "Seek back";
+        key = "action.seek_back";
         break;
     case Action::SeekForward:
-        hant = "前進";
-        hans = "前进";
-        en = "Seek forward";
+        key = "action.seek_forward";
         break;
     case Action::Loop:
-        hant = "循環";
-        hans = "循环";
-        en = "Loop";
+        key = "action.loop";
         break;
     case Action::ClearLoop:
-        hant = "清除循環";
-        hans = "清除循环";
-        en = "Clear loop";
+        key = "action.clear_loop";
         break;
     case Action::Metro:
-        hant = "節拍器";
-        hans = "节拍器";
-        en = "Metronome";
+        key = "action.metro";
         break;
     case Action::CountIn:
-        hant = "數四拍";
-        hans = "数四拍";
-        en = "Count in";
+        key = "action.count_in";
         break;
     case Action::Snap:
-        hant = "對拍";
-        hans = "对拍";
-        en = "Snap";
+        key = "action.snap";
         break;
     case Action::Mute:
-        hant = "靜音選取軌";
-        hans = "静音选取轨";
-        en = "Mute selected";
+        key = "action.mute";
         break;
     case Action::Solo:
-        hant = "獨奏選取軌";
-        hans = "独奏选取轨";
-        en = "Solo selected";
+        key = "action.solo";
         break;
     case Action::PrevTrack:
-        hant = "上一軌";
-        hans = "上一轨";
-        en = "Previous track";
+        key = "action.prev_track";
         break;
     case Action::NextTrack:
-        hant = "下一軌";
-        hans = "下一轨";
-        en = "Next track";
+        key = "action.next_track";
         break;
     case Action::ViewGuitar:
-        hant = "吉他視圖";
-        hans = "吉他视图";
-        en = "Guitar view";
+        key = "action.view_guitar";
         break;
     case Action::ViewBass:
-        hant = "貝斯視圖";
-        hans = "贝斯视图";
-        en = "Bass view";
-        break;
-    case Action::ViewRoll:
-        hant = "鋼琴卷簾";
-        hans = "钢琴卷帘";
-        en = "Piano roll";
+        key = "action.view_bass";
         break;
     case Action::ViewFall:
-        hant = "下落視圖";
-        hans = "下落视图";
-        en = "Fall view";
+        key = "action.view_fall";
         break;
     case Action::AdjustSpeed:
-        hant = "速度 −／+";
-        hans = "速度 −／+";
-        en = "Speed − / +";
+        key = "action.adjust_speed";
         break;
     case Action::AdjustSeek:
-        hant = "步進 −／+";
-        hans = "步进 −／+";
-        en = "Seek step − / +";
+        key = "action.adjust_seek";
         break;
     case Action::AdjustMaster:
-        hant = "主音量 −／+";
-        hans = "主音量 −／+";
-        en = "Master − / +";
+        key = "action.adjust_master";
         break;
     case Action::AdjustClick:
-        hant = "節拍器音量 −／+";
-        hans = "节拍器音量 −／+";
-        en = "Click − / +";
+        key = "action.adjust_click";
         break;
     case Action::AdjustTrackGain:
-        hant = "選取軌音量 −／+";
-        hans = "选取轨音量 −／+";
-        en = "Track volume − / +";
+        key = "action.adjust_track_gain";
         break;
     case Action::AdjustTrackPan:
-        hant = "選取軌聲像 左／右";
-        hans = "选取轨声像 左／右";
-        en = "Track pan L / R";
+        key = "action.adjust_track_pan";
         break;
     case Action::Count:
         break;
     }
-    if (language == 1) {
-        return hans;
-    }
-    if (language == 2) {
-        return en;
-    }
-    return hant;
+    return t(key, language);
 }
 
 Keymap default_keymap() {
@@ -402,8 +330,7 @@ Keymap default_keymap() {
     map.bindings[static_cast<std::size_t>(Action::NextTrack)] = chord(ImGuiKey_S);
     map.bindings[static_cast<std::size_t>(Action::ViewGuitar)] = chord(ImGuiKey_F1);
     map.bindings[static_cast<std::size_t>(Action::ViewBass)] = chord(ImGuiKey_F2);
-    map.bindings[static_cast<std::size_t>(Action::ViewRoll)] = chord(ImGuiKey_F3);
-    map.bindings[static_cast<std::size_t>(Action::ViewFall)] = chord(ImGuiKey_F4);
+    map.bindings[static_cast<std::size_t>(Action::ViewFall)] = chord(ImGuiKey_F3);
     map.bindings[static_cast<std::size_t>(Action::AdjustSpeed)] = chord(ImGuiKey_1);
     map.bindings[static_cast<std::size_t>(Action::AdjustSeek)] = chord(ImGuiKey_2);
     map.bindings[static_cast<std::size_t>(Action::AdjustMaster)] = chord(ImGuiKey_3);
@@ -609,8 +536,8 @@ std::string chord_with_seek(const Keymap& map, const KeyChord& binding, int slot
 
 void draw_keymap_settings(App& app) {
     const float scale = ImGui::GetIO().FontGlobalScale > 0.f ? ImGui::GetIO().FontGlobalScale : 1.f;
-    ImGui::TextUnformatted(app.language == 2 ? "Shortcuts" : app.language == 1 ? "快捷键" : "快捷鍵");
-    const char* reset_label = app.language == 2 ? "Reset" : "還原";
+    ImGui::TextUnformatted(t("shortcut.heading"));
+    const char* reset_label = t("shortcut.reset");
     const float gap = 4.f * scale;
     const float reset_w = ImGui::CalcTextSize(reset_label).x + ImGui::GetStyle().FramePadding.x * 2.f;
     struct Reject {
@@ -622,7 +549,7 @@ void draw_keymap_settings(App& app) {
     const Keymap defaults = default_keymap();
     // Stage views, then each mixer strip, then the transport row and the waveform under it.
     const Action order[] = {
-        Action::ViewGuitar, Action::ViewBass, Action::ViewRoll, Action::ViewFall,
+        Action::ViewGuitar, Action::ViewBass, Action::ViewFall,
         Action::PrevTrack, Action::NextTrack, Action::AdjustTrackGain, Action::AdjustTrackPan, Action::Mute, Action::Solo,
         Action::PlayPause, Action::CountIn, Action::Stop, Action::Loop, Action::ClearLoop, Action::Snap,
         Action::AdjustSpeed, Action::AdjustSeek, Action::AdjustMaster, Action::AdjustClick, Action::Metro,
@@ -634,7 +561,7 @@ void draw_keymap_settings(App& app) {
         const int index = static_cast<int>(action);
         const bool adjust = action >= Action::AdjustSpeed && action <= Action::AdjustTrackPan;
         ImGui::PushID(index);
-        ImGui::TextUnformatted(action_label(action, app.language));
+        ImGui::TextUnformatted(action_label(action, i18n_language()));
         ImGui::SameLine(0.f, gap);
         const float spare = ImGui::GetContentRegionAvail().x;
         if (spare > reset_w) {
@@ -657,8 +584,7 @@ void draw_keymap_settings(App& app) {
                 ImGui::SameLine(0.f, gap);
             }
             const std::string shown = adjust ? chord_with_seek(app.keymap, binding, slot) : chord_text(binding);
-            const std::string label = capturing ? (app.language == 2 ? "Press key..." : app.language == 1 ? "请按键..." : "請按鍵…")
-                                                : shown;
+            const std::string label = capturing ? t("shortcut.press") : shown;
             const bool clash = !capturing && binding.key != 0 && conflict_of(app.keymap, action, slot, binding) >= 0;
             if (clash) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.14f, 0.14f, 1.f));
@@ -711,9 +637,9 @@ void draw_keymap_settings(App& app) {
         if (reject.index / 2 == index) {
             const char* note = nullptr;
             if (reject.kind == 2) {
-                note = app.language == 2 ? "Reserved" : app.language == 1 ? "留给系统" : "留給系統";
+                note = t("shortcut.reserved");
             } else if (reject.kind == 3) {
-                note = app.language == 2 ? "Use a key without modifiers" : app.language == 1 ? "请用不含修饰键的按键" : "請用不含修飾鍵的按鍵";
+                note = t("shortcut.no_modifiers");
             }
             if (note != nullptr) {
                 ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
@@ -724,7 +650,7 @@ void draw_keymap_settings(App& app) {
         ImGui::PopID();
     }
     if (ImGui::Button(
-            app.language == 2 ? "Reset all shortcuts" : app.language == 1 ? "还原全部快捷键" : "還原全部快捷鍵",
+            t("shortcut.reset_all"),
             ImVec2(std::max(1.f, ImGui::GetContentRegionAvail().x), 0.f))) {
         app.keymap = default_keymap();
         save_keymap(app);
@@ -812,7 +738,7 @@ void handle_actions(App& app, bool ready) {
     };
 
     if (ready && pressed(Action::PlayPause, false)) {
-        start_or_pause_transport(app, transport);
+        start_or_pause(app, transport);
     }
     if (ready && pressed(Action::Stop, false)) {
         app.player->stop();
@@ -896,9 +822,6 @@ void handle_actions(App& app, bool ready) {
     }
     if (pressed(Action::ViewBass, false)) {
         app.midi_view = MidiView::Bass;
-    }
-    if (pressed(Action::ViewRoll, false)) {
-        app.midi_view = MidiView::Roll;
     }
     if (pressed(Action::ViewFall, false)) {
         app.midi_view = MidiView::Fall;

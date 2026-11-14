@@ -6,13 +6,22 @@
 
 # Python export environment
 .venv/
+.venv-onnx/
 __pycache__/
 .pytest_cache/
+
+# Local evaluation datasets (e.g. Bach10)
+/datasets/
 
 # Model weights
 /models/
 *.onnx
 *.onnx.data
+*.ckpt
+/BS-Rofo-SW-Fixed.yaml
+
+# CUDA EP + redistributable DLLs from fetch-cuda.bat
+/cuda-ep/
 
 # IDE / OS
 .vscode/

@@ -1,9 +1,15 @@
-# Export a local BS-RoFormer SW checkpoint. This does not download weights.
+# Export BS-RoFormer SW to ONNX. Prefer the one-shot script:
+#   export-onnx.bat
+# Or download weights then export:
+#   python tools/fetch_bs_roformer_sw.py
 #   python -m pip install -r requirements-bs-roformer-onnx.txt
 #   python -m bs_roformer_sw_onnx export models/bs_roformer_sw.onnx --checkpoint BS-Rofo-SW-Fixed.ckpt --config BS-Rofo-SW-Fixed.yaml
 
-torch>=2.4
+torch>=2.4,<2.6
 onnx>=1.17
+# Torch 2.4 ONNX type hints still reference onnxscript.values.ParamSchema,
+# which newer onnxscript removed (0.6+). Pin below that for demucs/torch export.
+onnxscript>=0.5.0,<0.6
 onnxconverter-common>=1.14
 einops>=0.8
 rotary-embedding-torch>=0.8

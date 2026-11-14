@@ -1,5 +1,6 @@
 #include "bt/player.hpp"
 
+#include "bt/midi_synth.hpp"
 #include "bt/pitch_mask.hpp"
 #include "bt/time_stretch.hpp"
 
@@ -129,6 +130,15 @@ struct Player::PitchMask {
     std::uint64_t notes_revision = 0;
 };
 
+struct Player::VerifyMix {
+    VerifyLane original{};
+    VerifyLane midi{.mute = true};
+    int lo_midi = 21;
+    int hi_midi = 108;
+    std::shared_ptr<const std::vector<MidiSynthNote>> notes;
+    std::uint64_t notes_revision = 0;
+};
+
 struct Player::State {
     TimeStretcher stretcher;
     std::mutex mix_mu;
@@ -136,6 +146,9 @@ struct Player::State {
     Mix block_mix;
     PitchMask published_mask;
     PitchMask block_mask;
+    std::array<VerifyMix, kStemCount> published_verify{};
+    std::array<VerifyMix, kStemCount> block_verify{};
+    std::array<MidiSynth, kStemCount> midi_synth{};
     BiquadCoeffs highpass{};
     BiquadCoeffs lowpass{};
     BiquadState highpass_l{};
@@ -296,6 +309,31 @@ void Player::set_mix(
     state_->published_mix.mute = mute;
     state_->published_mix.solo = solo;
     state_->published_mix.pan = pan;
+}
+
+void Player::set_verify_mix(
+    int stem, const VerifyLane& original, const VerifyLane& midi, int lo_midi, int hi_midi,
+    std::shared_ptr<const std::vector<MidiSynthNote>> notes, std::uint64_t notes_revision) {
+    int lo = std::clamp(lo_midi, 0, 127);
+    int hi = std::clamp(hi_midi, 0, 127);
+    if (lo > hi) {
+        std::swap(lo, hi);
+    }
+    stem = std::clamp(stem, 0, kStemCount - 1);
+    std::lock_guard lock(state_->mix_mu);
+    VerifyMix& slot = state_->published_verify[static_cast<std::size_t>(stem)];
+    slot.original = original;
+    slot.midi = midi;
+    slot.lo_midi = lo;
+    slot.hi_midi = hi;
+    slot.notes = std::move(notes);
+    slot.notes_revision = notes_revision;
+}
+
+void Player::reset_midi_synth() {
+    for (MidiSynth& synth : state_->midi_synth) {
+        synth.reset();
+    }
 }
 
 void Player::set_pitch_mask(
@@ -890,6 +928,7 @@ void Player::install_song() {
     state_->stretcher.reset(0);
     state_->applied_seek = state_->seek_serial.load(std::memory_order_acquire);
     reset_pitch_mask_filters();
+    reset_midi_synth();
     {
         std::lock_guard lock(state_->spectral_mu);
         if (state_->spectral_source != state_->stems.get()) {
@@ -912,6 +951,7 @@ void Player::apply_transport() {
         state_->metro_song = seconds;
         state_->click_left = 0;
         reset_pitch_mask_filters();
+        reset_midi_synth();
     }
     const float speed = state_->speed.load();
     if (speed != state_->applied_speed) {
@@ -919,6 +959,7 @@ void Player::apply_transport() {
         state_->stretcher.set_rate(speed);
         state_->stretcher.reset(state_->position.load() * static_cast<double>(kSampleRate));
         reset_pitch_mask_filters();
+        reset_midi_synth();
     }
 }
 
@@ -964,6 +1005,13 @@ int Player::read_source(int start, int frames, float* interleaved) {
         if (static_cast<std::int64_t>(audio.size()) < (stems->frames) * 2) {
             continue;
         }
+        const VerifyMix& verify = state_->block_verify[static_cast<std::size_t>(stem)];
+        const bool verify_solo = verify.original.solo || verify.midi.solo;
+        const bool verify_orig_on =
+            !verify.original.mute && (!verify_solo || verify.original.solo) && verify.original.gain > 0.f;
+        if (!verify_orig_on) {
+            continue;
+        }
         const bool use_spectral =
             spectral && stem == spectral_stem && spectral_frames == stems->frames &&
             static_cast<std::int64_t>(spectral->size()) >= stems->frames * 2;
@@ -973,8 +1021,9 @@ int Player::read_source(int start, int frames, float* interleaved) {
             continue;
         }
         const float* planar = use_spectral ? spectral->data() : audio.data();
-        const float gain = mix.gain[static_cast<std::size_t>(stem)] * master;
-        const float pan = std::clamp(mix.pan[static_cast<std::size_t>(stem)], -1.f, 1.f);
+        const float gain = mix.gain[static_cast<std::size_t>(stem)] * master * verify.original.gain;
+        const float pan = std::clamp(
+            mix.pan[static_cast<std::size_t>(stem)] + verify.original.pan, -1.f, 1.f);
         const float theta = (pan + 1.f) * 0.78539816339f;
         const float pan_l = std::cos(theta) * 1.41421356237f;
         const float pan_r = std::sin(theta) * 1.41421356237f;
@@ -994,6 +1043,29 @@ int Player::read_source(int start, int frames, float* interleaved) {
             interleaved[i * 2 + 1] += sample_r;
         }
     }
+    for (int stem = 0; stem < kStemCount; ++stem) {
+        const bool audible = !mix.mute[static_cast<std::size_t>(stem)] &&
+                             (!any_solo || mix.solo[static_cast<std::size_t>(stem)]);
+        if (!audible) {
+            continue;
+        }
+        const VerifyMix& verify = state_->block_verify[static_cast<std::size_t>(stem)];
+        const bool verify_solo = verify.original.solo || verify.midi.solo;
+        const bool verify_midi_on =
+            !verify.midi.mute && (!verify_solo || verify.midi.solo) && verify.midi.gain > 0.f;
+        if (!verify_midi_on || !verify.notes || verify.notes->empty()) {
+            continue;
+        }
+        const float midi_gain = mix.gain[static_cast<std::size_t>(stem)] * master * verify.midi.gain;
+        const float pan = std::clamp(
+            mix.pan[static_cast<std::size_t>(stem)] + verify.midi.pan, -1.f, 1.f);
+        const float theta = (pan + 1.f) * 0.78539816339f;
+        const float pan_l = std::cos(theta) * 1.41421356237f;
+        const float pan_r = std::sin(theta) * 1.41421356237f;
+        state_->midi_synth[static_cast<std::size_t>(stem)].mix(
+            interleaved, available, start, verify.lo_midi, verify.hi_midi, midi_gain,
+            verify.notes->data(), verify.notes->size(), kSampleRate, pan_l, pan_r);
+    }
     return available;
 }
 
@@ -1007,6 +1079,16 @@ int Player::synthesize(float* interleaved, int frames) {
         if (stem_changed || enabled_changed) {
             reset_pitch_mask_filters();
             state_->filter_armed = false;
+        }
+        for (int stem = 0; stem < kStemCount; ++stem) {
+            const auto index = static_cast<std::size_t>(stem);
+            const bool verify_changed =
+                state_->block_verify[index].notes_revision !=
+                state_->published_verify[index].notes_revision;
+            state_->block_verify[index] = state_->published_verify[index];
+            if (verify_changed) {
+                state_->midi_synth[index].reset();
+            }
         }
     }
     sync_pitch_mask_filters();

@@ -49,11 +49,14 @@ public:
         bool cancelled = false;
         std::string error;
         std::vector<bt::Note> notes;
+        bt::PitchParameters parameters;
     };
 
     std::vector<Result> poll();
     std::size_t parked_results();
-    float progress() const;
+    // Per-stem job fraction in [0, 1]. Idle / unknown stems report 0.
+    float stem_progress(int stem) const;
+    void clear_stem_progress();
     int running_count() const;
 
 private:

@@ -28,15 +28,29 @@ struct PitchParameters {
     float maximum_frequency = 0.f;
 };
 
-// Vocals keep the melodia post-process. Bass uses a lower frequency window.
-// Guitar, piano, and other use the same thresholds with melodia off.
+// Per-stem decode defaults: bass band-limits, vocals melodia,
+// guitar/piano use stricter onset/frame from BabySlakh sweep; other stays 0.2/0.2.
+// Drums skip pitch transcription entirely (empty MIDI).
 PitchParameters pitch_parameters_for_stem(int stem);
+inline bool stem_skips_pitch(int stem) {
+    return stem == 0;  // drums
+}
 
 // Row-major activations, time major then 88 piano bins starting at MIDI 21.
 struct PitchActivations {
     int frames = 0;
     const float* note = nullptr;
     const float* onset = nullptr;
+};
+
+struct PitchActivationBuffer {
+    int frames = 0;
+    std::vector<float> note;
+    std::vector<float> onset;
+
+    PitchActivations view() const {
+        return PitchActivations{frames, note.data(), onset.data()};
+    }
 };
 
 std::vector<Note> notes_from_activations(const PitchActivations& activations, const PitchParameters& parameters);
@@ -54,6 +68,11 @@ public:
 
     BasicPitchModel(const BasicPitchModel&) = delete;
     BasicPitchModel& operator=(const BasicPitchModel&) = delete;
+
+    // Mono float audio at 22050 Hz, the full stem from t = 0. ONNX only; decode with notes_from_activations.
+    std::expected<PitchActivationBuffer, std::string> infer_activations(
+        const float* samples, std::int64_t frames, const std::function<void(float)>& progress = {},
+        const std::function<bool()>& cancelled = {}) const;
 
     // Mono float audio at 22050 Hz, the full stem from t = 0.
     std::expected<std::vector<Note>, std::string> transcribe(

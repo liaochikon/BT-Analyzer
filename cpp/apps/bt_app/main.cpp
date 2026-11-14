@@ -1,5 +1,8 @@
 #include "ui.hpp"
 
+#include "i18n.hpp"
+#include "icons.hpp"
+
 #include "bt/basic_pitch.hpp"
 #include "bt/project.hpp"
 #include "notes.hpp"
@@ -289,6 +292,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     btapp::App boot;
     boot.cache_directory = cache_directory;
     btapp::load_performance(boot);
+    {
+        const auto locales_dir = locate_asset(exe_dir, cwd, "locales");
+        if (!locales_dir.empty()) {
+            btapp::i18n_load(locales_dir);
+        }
+        btapp::load_language(boot);
+    }
     const int demucs_threads = boot.demucs_threads;
     const int note_workers = boot.note_workers;
     const std::string separation_model = boot.separation_model;
@@ -308,7 +318,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     std::string pitch_error;
     std::unique_ptr<btapp::NoteService> note_service;
     if (pitch_path.empty()) {
-        pitch_error = "找不到 models/nmp.onnx";
+        pitch_error = "error.missing_nmp";
     } else {
         try {
             note_service = std::make_unique<btapp::NoteService>(pitch_path, note_workers);
@@ -345,12 +355,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
             &gfx.device, nullptr, &gfx.context);
     }
     if (FAILED(created)) {
-        MessageBoxW(nullptr, L"Direct3D 11 無法啟動", title.c_str(), MB_ICONERROR);
+        const std::wstring d3d_error = btapp::tw("error.d3d");
+        MessageBoxW(nullptr, d3d_error.c_str(), title.c_str(), MB_ICONERROR);
         return 1;
     }
     gfx.swap_flags = swap_desc.Flags;
     if (!create_target(gfx)) {
-        MessageBoxW(nullptr, L"Direct3D 11 無法啟動", title.c_str(), MB_ICONERROR);
+        const std::wstring d3d_error = btapp::tw("error.d3d");
+        MessageBoxW(nullptr, d3d_error.c_str(), title.c_str(), MB_ICONERROR);
         return 1;
     }
     RECT client{};
@@ -370,7 +382,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     };
     auto session_created = bt::Session::create(std::move(options));
     if (!session_created) {
-        MessageBoxW(nullptr, L"Session 無法啟動", title.c_str(), MB_ICONERROR);
+        const std::wstring session_error = btapp::tw("error.session");
+        MessageBoxW(nullptr, session_error.c_str(), title.c_str(), MB_ICONERROR);
         return 1;
     }
     auto session = std::move(*session_created);
@@ -412,6 +425,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     ImGui_ImplDX11_Init(gfx.device, gfx.context);
     gfx.imgui_ready = true;
     apply_dpi(gfx);
+    {
+        const auto atlas_png = locate_asset(exe_dir, cwd, "assets/icons/atlas.png");
+        if (!atlas_png.empty()) {
+            btapp::load_icon_atlas(gfx.device, atlas_png);
+        }
+    }
 
     btapp::App app;
     app.session = session.get();
@@ -470,6 +489,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
         render_frame(&host);
     }
 
+    btapp::unload_icon_atlas();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

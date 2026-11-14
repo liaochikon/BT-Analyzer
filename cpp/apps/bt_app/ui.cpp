@@ -1,5 +1,9 @@
 #include "ui.hpp"
 
+#include "i18n.hpp"
+#include "icons.hpp"
+#include "transport.hpp"
+
 #include "beats.hpp"
 #include "keys.hpp"
 #include "midi_view.hpp"
@@ -40,6 +44,40 @@ namespace btapp {
 
 void load_output(App& app);
 void save_output(const App& app);
+void save_language(const App& app);
+
+void set_language(App& app, int language) {
+    app.language = language < 0 ? 0 : (language > 2 ? 2 : language);
+    i18n_set_language(app.language);
+}
+
+void load_language(App& app) {
+    if (app.language_loaded) {
+        return;
+    }
+    app.language_loaded = true;
+    std::ifstream input(app.cache_directory / "ui-language.txt");
+    std::string token;
+    input >> token;
+    if (token == "zh-Hans") {
+        set_language(app, 1);
+    } else if (token == "en") {
+        set_language(app, 2);
+    } else {
+        set_language(app, 0);
+    }
+}
+
+void save_language(const App& app) {
+    if (app.cache_directory.empty()) {
+        return;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(app.cache_directory, error);
+    std::ofstream output(app.cache_directory / "ui-language.txt", std::ios::trunc);
+    const char* name = app.language == 1 ? "zh-Hans" : app.language == 2 ? "en" : "zh-Hant";
+    output << name << '\n';
+}
 
 void save_performance(const App& app) {
     if (app.cache_directory.empty()) {
@@ -95,95 +133,6 @@ namespace {
 
 constexpr int kMixDrag = 6;
 constexpr int kMeterSegments = 24;
-
-struct Phrase {
-    const char* hant;
-    const char* hans;
-    const char* en;
-};
-
-const char* tr(const Phrase& phrase, int language) {
-    if (language == 1) {
-        return phrase.hans;
-    }
-    if (language == 2) {
-        return phrase.en;
-    }
-    return phrase.hant;
-}
-
-const Phrase kOpen{{"開啟"}, {"打开"}, {"Open"}};
-const Phrase kSettings{{"設定"}, {"设置"}, {"Settings"}};
-const Phrase kMonitor{{"系統監控"}, {"系统监控"}, {"Monitor"}};
-const Phrase kLanguage{{"語言"}, {"语言"}, {"Language"}};
-const Phrase kSelected{{"選定音軌"}, {"选定音轨"}, {"Selected stem"}};
-const Phrase kPlay{{"播放"}, {"播放"}, {"Play"}};
-const Phrase kCountIn{{"數四拍"}, {"数四拍"}, {"Count in"}};
-const Phrase kPause{{"暫停"}, {"暂停"}, {"Pause"}};
-const Phrase kStop{{"停止"}, {"停止"}, {"Stop"}};
-const Phrase kLoop{{"循環"}, {"循环"}, {"Loop"}};
-const Phrase kLoopOff{{"循環關"}, {"循环关"}, {"Loop off"}};
-const Phrase kClear{{"清除"}, {"清除"}, {"Clear"}};
-const Phrase kSnap{{"對拍"}, {"对拍"}, {"Snap"}};
-const Phrase kSpeed{{"速度"}, {"速度"}, {"Speed"}};
-const Phrase kSeekStep{{"步進"}, {"步进"}, {"Seek step"}};
-const Phrase kMaster{{"主音量"}, {"主音量"}, {"Master"}};
-const Phrase kMute{{"靜音"}, {"静音"}, {"Mute"}};
-const Phrase kSolo{{"獨奏"}, {"独奏"}, {"Solo"}};
-const Phrase kCancel{{"取消"}, {"取消"}, {"Cancel"}};
-const Phrase kMetronome{{"節拍器"}, {"节拍器"}, {"Metronome"}};
-const Phrase kBeatAgain{{"重測"}, {"重测"}, {"Detect"}};
-const Phrase kClick{{"節拍器音量"}, {"节拍器音量"}, {"Click"}};
-const Phrase kGuitarView{{"吉他"}, {"吉他"}, {"Guitar"}};
-const Phrase kBassView{{"貝斯"}, {"贝斯"}, {"Bass"}};
-const Phrase kRoll{{"Piano Roll"}, {"Piano Roll"}, {"Piano Roll"}};
-const Phrase kFall{{"鋼琴下落"}, {"钢琴下落"}, {"Piano drop"}};
-const Phrase kFrets{{"品格"}, {"品格"}, {"Frets"}};
-const Phrase kBright{{"亮度"}, {"亮度"}, {"Bright"}};
-const Phrase kPitchMin{{"最低音"}, {"最低音"}, {"Min pitch"}};
-const Phrase kPitchMax{{"最高音"}, {"最高音"}, {"Max pitch"}};
-const Phrase kPitchMask{{"音域遮罩"}, {"音域遮罩"}, {"Pitch mask"}};
-const Phrase kPitchMaskBuild{{"遮罩中"}, {"遮罩中"}, {"Masking"}};
-const Phrase kModeSuggest{{"建議把位"}, {"建议把位"}, {"Suggested"}};
-const Phrase kPrefer{{"偏好把位"}, {"偏好把位"}, {"Position"}};
-const Phrase kAllowOpen{{"空弦"}, {"空弦"}, {"Open"}};
-const Phrase kShowAlt{{"其他位置"}, {"其他位置"}, {"Alternatives"}};
-const Phrase kHarmonic{{"泛音"}, {"泛音"}, {"Harmonics"}};
-const Phrase kProjects{{"專案"}, {"项目"}, {"Projects"}};
-const Phrase kImport{{"匯入"}, {"导入"}, {"Import"}};
-const Phrase kDelete{{"刪除"}, {"删除"}, {"Delete"}};
-const Phrase kRename{{"改名"}, {"改名"}, {"Rename"}};
-const Phrase kSeparation{{"分軌"}, {"分轨"}, {"Separation"}};
-const Phrase kSeparationModel{{"分軌模型"}, {"分轨模型"}, {"Stem model"}};
-const Phrase kInferenceDevice{{"推論裝置"}, {"推理设备"}, {"Inference device"}};
-const Phrase kDeviceAuto{{"自動"}, {"自动"}, {"Auto"}};
-const Phrase kDeviceCpu{{"CPU"}, {"CPU"}, {"CPU"}};
-const Phrase kDeviceCuda{{"CUDA"}, {"CUDA"}, {"CUDA"}};
-const Phrase kAudio{{"音訊"}, {"音频"}, {"Audio"}};
-const Phrase kOutput{{"輸出裝置"}, {"输出设备"}, {"Output"}};
-const Phrase kDeviceDefault{{"系統預設"}, {"系统默认"}, {"System default"}};
-const Phrase kRerun{{"重跑"}, {"重跑"}, {"Rerun"}};
-const Phrase kOnset{{"起音"}, {"起音"}, {"Onset"}};
-const Phrase kFrame{{"音框"}, {"音框"}, {"Frame"}};
-const Phrase kMinMs{{"最短"}, {"最短"}, {"Min"}};
-const Phrase kMinHz{{"最低 Hz"}, {"最低 Hz"}, {"Min Hz"}};
-const Phrase kMaxHz{{"最高 Hz"}, {"最高 Hz"}, {"Max Hz"}};
-const Phrase kMelodia{{"Melodia"}, {"Melodia"}, {"Melodia"}};
-const Phrase kUnlimited{{"不限"}, {"不限"}, {"Any"}};
-const Phrase kLook{{"外觀"}, {"外观"}, {"Look"}};
-const Phrase kRange{{"音域"}, {"音域"}, {"Range"}};
-const Phrase kHand{{"把位"}, {"把位"}, {"Fingering"}};
-const Phrase kPitchFold{{"轉譜"}, {"转谱"}, {"Pitch"}};
-const Phrase kTranscribe{{"轉譜中"}, {"转谱中"}, {"Transcribing"}};
-const Phrase kPitchMissing{{"找不到 models/nmp.onnx"}, {"找不到 models/nmp.onnx"}, {"models/nmp.onnx was not found"}};
-const Phrase kStems[bt::kStemCount] = {
-    {{"鼓"}, {"鼓"}, {"Drums"}},
-    {{"貝斯"}, {"贝斯"}, {"Bass"}},
-    {{"其他"}, {"其他"}, {"Other"}},
-    {{"人聲"}, {"人声"}, {"Vocals"}},
-    {{"吉他"}, {"吉他"}, {"Guitar"}},
-    {{"鋼琴"}, {"钢琴"}, {"Piano"}},
-};
 
 constexpr ImU32 kStemColor[bt::kStemCount] = {
     IM_COL32(196, 104, 71, 255),
@@ -262,50 +211,22 @@ void format_pan(float pan, char* text, std::size_t size) {
     std::snprintf(text, size, "%s %d", rounded < 0 ? "L" : "R", std::abs(rounded));
 }
 
-const char* phase_text(bt::SongPhase phase, int language) {
+const char* phase_text(bt::SongPhase phase, int /*language*/) {
     switch (phase) {
     case bt::SongPhase::Empty:
         return "";
     case bt::SongPhase::Decoding:
-        return tr({{"解碼中"}, {"解码中"}, {"Decoding"}}, language);
+        return t("phase.decoding");
     case bt::SongPhase::Separating:
-        return tr({{"分離中"}, {"分离中"}, {"Separating"}}, language);
+        return t("phase.separating");
     case bt::SongPhase::Ready:
         return "";
     case bt::SongPhase::Cancelled:
-        return tr({{"已取消"}, {"已取消"}, {"Cancelled"}}, language);
+        return t("phase.cancelled");
     case bt::SongPhase::Failed:
-        return tr({{"失敗"}, {"失败"}, {"Failed"}}, language);
+        return t("phase.failed");
     }
     return "";
-}
-
-void load_language(App& app) {
-    if (app.language_loaded) {
-        return;
-    }
-    app.language_loaded = true;
-    std::ifstream input(app.cache_directory / "ui-language.txt");
-    std::string token;
-    input >> token;
-    if (token == "zh-Hans") {
-        app.language = 1;
-    } else if (token == "en") {
-        app.language = 2;
-    } else {
-        app.language = 0;
-    }
-}
-
-void save_language(const App& app) {
-    if (app.cache_directory.empty()) {
-        return;
-    }
-    std::error_code error;
-    std::filesystem::create_directories(app.cache_directory, error);
-    std::ofstream output(app.cache_directory / "ui-language.txt", std::ios::trunc);
-    const char* name = app.language == 1 ? "zh-Hans" : app.language == 2 ? "en" : "zh-Hant";
-    output << name << '\n';
 }
 
 void refresh_outputs(App& app) {
@@ -314,7 +235,7 @@ void refresh_outputs(App& app) {
     if (due && app.player != nullptr) {
         app.outputs_at = now;
         std::vector<OutputChoice> next;
-        next.push_back(OutputChoice{"", tr(kDeviceDefault, app.language)});
+        next.push_back(OutputChoice{"", t("device_default")});
         for (const bt::PlaybackDevice& device : app.player->playback_devices()) {
             OutputChoice choice;
             choice.id = device.id;
@@ -338,9 +259,9 @@ void refresh_outputs(App& app) {
             }
         }
     } else if (app.outputs.empty()) {
-        app.outputs.push_back(OutputChoice{"", tr(kDeviceDefault, app.language)});
+        app.outputs.push_back(OutputChoice{"", t("device_default")});
     } else {
-        app.outputs.front().name = tr(kDeviceDefault, app.language);
+        app.outputs.front().name = t("device_default");
     }
     app.output_device = 0;
     for (int index = 0; index < static_cast<int>(app.outputs.size()); ++index) {
@@ -494,6 +415,14 @@ void update_meters(App& app, const bt::SongSnapshot& song, const bt::Player::Sna
 }
 
 void draw_icon(ImDrawList* draw, Icon icon, ImVec2 min, ImVec2 max, ImU32 color) {
+    // Atlas glyphs are drawn at 2/3 of the button inset (shrink by 1/3 vs full fill).
+    const float cx = (min.x + max.x) * 0.5f;
+    const float cy = (min.y + max.y) * 0.5f;
+    const float hw = (max.x - min.x) * (1.f / 3.f);
+    const float hh = (max.y - min.y) * (1.f / 3.f);
+    if (draw_icon_atlas(draw, icon, ImVec2(cx - hw, cy - hh), ImVec2(cx + hw, cy + hh), color)) {
+        return;
+    }
     const ImVec2 center((min.x + max.x) * 0.5f, (min.y + max.y) * 0.5f);
     const float s = (max.y - min.y) * 0.28f;
     switch (icon) {
@@ -509,13 +438,28 @@ void draw_icon(ImDrawList* draw, Icon icon, ImVec2 min, ImVec2 max, ImU32 color)
     case Icon::Stop:
         draw->AddRectFilled(ImVec2(center.x - s * 0.7f, center.y - s * 0.7f), ImVec2(center.x + s * 0.7f, center.y + s * 0.7f), color);
         break;
-    case Icon::Loop:
-        draw->PathArcTo(center, s * 0.75f, 0.6f, 5.2f, 10);
-        draw->PathStroke(color, 0, std::max(1.4f, s * 0.18f));
+    case Icon::Loop: {
+        // Chamfered square repeat path (matches atlas).
+        const float thick = std::max(1.6f, s * 0.2f);
+        const float box_w = s * 1.05f;
+        const float box_h = s * 0.78f;
+        const float ch = s * 0.35f;
+        const float l = center.x - box_w;
+        const float r = center.x + box_w;
+        const float t = center.y - box_h;
+        const float btm = center.y + box_h;
+        const ImVec2 path[] = {
+            {center.x - s * 0.2f, t}, {l + ch, t}, {l, t + ch}, {l, btm - ch}, {l + ch, btm},
+            {r - ch, btm}, {r, btm - ch}, {r, t + ch}, {r - ch, t}, {center.x + s * 0.55f, t},
+        };
+        for (int i = 1; i < 10; ++i) {
+            draw->AddLine(path[i - 1], path[i], color, thick);
+        }
         draw->AddTriangleFilled(
-            ImVec2(center.x + s * 0.15f, center.y - s * 1.15f), ImVec2(center.x + s * 0.95f, center.y - s * 0.35f),
-            ImVec2(center.x + s * 0.15f, center.y - s * 0.15f), color);
+            ImVec2(center.x - s * 0.35f, t), ImVec2(center.x + s * 0.45f, t - s * 0.5f),
+            ImVec2(center.x + s * 0.45f, t + s * 0.5f), color);
         break;
+    }
     case Icon::Clear:
         draw->AddLine(ImVec2(center.x - s, center.y - s), ImVec2(center.x + s, center.y + s), color, std::max(1.6f, s * 0.18f));
         draw->AddLine(ImVec2(center.x + s, center.y - s), ImVec2(center.x - s, center.y + s), color, std::max(1.6f, s * 0.18f));
@@ -581,15 +525,9 @@ void draw_icon(ImDrawList* draw, Icon icon, ImVec2 min, ImVec2 max, ImU32 color)
         draw->AddCircleFilled(ImVec2(center.x + s * 0.55f, center.y - s * 0.85f), s * 0.22f, color);
         break;
     case Icon::Import: {
-        const float thick = std::max(1.4f, s * 0.16f);
-        draw->AddLine(ImVec2(center.x - s, center.y - s * 0.2f), ImVec2(center.x - s * 0.2f, center.y - s * 0.2f), color, thick);
-        draw->AddLine(ImVec2(center.x - s * 0.2f, center.y - s * 0.2f), ImVec2(center.x + s * 0.05f, center.y - s * 0.85f), color, thick);
-        draw->AddLine(ImVec2(center.x + s * 0.05f, center.y - s * 0.85f), ImVec2(center.x + s, center.y - s * 0.85f), color, thick);
-        draw->AddRect(ImVec2(center.x - s, center.y - s * 0.2f), ImVec2(center.x + s, center.y + s), color, 0.f, 0, thick);
-        draw->AddLine(ImVec2(center.x, center.y - s * 0.05f), ImVec2(center.x, center.y + s * 0.45f), color, thick);
-        draw->AddTriangleFilled(
-            ImVec2(center.x - s * 0.38f, center.y + s * 0.15f), ImVec2(center.x + s * 0.38f, center.y + s * 0.15f),
-            ImVec2(center.x, center.y + s * 0.62f), color);
+        const float thick = std::max(2.f, s * 0.28f);
+        draw->AddLine(ImVec2(center.x - s, center.y), ImVec2(center.x + s, center.y), color, thick);
+        draw->AddLine(ImVec2(center.x, center.y - s), ImVec2(center.x, center.y + s), color, thick);
         break;
     }
     case Icon::Cancel: {
@@ -626,21 +564,6 @@ void draw_icon(ImDrawList* draw, Icon icon, ImVec2 min, ImVec2 max, ImU32 color)
         draw->AddCircleFilled(ImVec2(center.x + s * 0.22f, center.y - s * 0.85f), s * 0.1f, color);
         break;
     }
-    case Icon::Roll: {
-        const float thick = std::max(1.2f, s * 0.12f);
-        for (int lane = 0; lane < 3; ++lane) {
-            const float y = center.y - s * 0.55f + static_cast<float>(lane) * s * 0.55f;
-            draw->AddLine(ImVec2(center.x - s, y), ImVec2(center.x + s, y), color, thick);
-        }
-        draw->AddRectFilled(ImVec2(center.x - s * 0.75f, center.y - s * 0.82f), ImVec2(center.x - s * 0.15f, center.y - s * 0.32f), color);
-        draw->AddRectFilled(ImVec2(center.x + s * 0.1f, center.y - s * 0.28f), ImVec2(center.x + s * 0.8f, center.y + s * 0.22f), color);
-        break;
-    }
-    case Icon::Fall:
-        draw->AddRectFilled(ImVec2(center.x - s * 0.85f, center.y - s), ImVec2(center.x - s * 0.35f, center.y - s * 0.05f), color);
-        draw->AddRectFilled(ImVec2(center.x - s * 0.15f, center.y - s * 0.35f), ImVec2(center.x + s * 0.35f, center.y + s * 0.45f), color);
-        draw->AddRectFilled(ImVec2(center.x + s * 0.5f, center.y - s * 0.75f), ImVec2(center.x + s, center.y + s), color);
-        break;
     case Icon::Positions:
         for (int row = 0; row < 2; ++row) {
             for (int col = 0; col < 3; ++col) {
@@ -752,6 +675,24 @@ float drag_sensitivity(float min_value, float max_value) {
     return std::max(max_value - min_value, 0.0001f) / 150.f;
 }
 
+// Map 0..1 onto a 270° sweep with the gap at the bottom (FL-style).
+float knob_angle(float norm) {
+    return -1.5707963f + (std::clamp(norm, 0.f, 1.f) - 0.5f) * 4.712389f;
+}
+
+float knob_norm(float value, float min_value, float max_value, float visual_center) {
+    const float span = std::max(max_value - min_value, 0.0001f);
+    float norm = std::clamp((value - min_value) / span, 0.f, 1.f);
+    if (visual_center > min_value && visual_center < max_value) {
+        if (value <= visual_center) {
+            norm = 0.5f * std::clamp((value - min_value) / (visual_center - min_value), 0.f, 1.f);
+        } else {
+            norm = 0.5f + 0.5f * std::clamp((value - visual_center) / (max_value - visual_center), 0.f, 1.f);
+        }
+    }
+    return norm;
+}
+
 bool knob(
     App& app, const char* id, float* value, float min_value, float max_value, float reset, float sensitivity, const char* tip,
     float visual_center = NAN, float diameter = 0.f, bool enabled = true) {
@@ -783,24 +724,68 @@ bool knob(
             changed = true;
         }
     }
+
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImVec2 center(origin.x + size * 0.5f, origin.y + size * 0.5f);
-    const float radius = size * 0.46f;
-    draw->AddCircleFilled(center, radius, paint(IM_COL32(58, 58, 58, 255), disabled), 24);
-    draw->AddCircle(center, radius, paint(IM_COL32(17, 17, 17, 255), disabled), 24, 2.f);
-    const float span = std::max(max_value - min_value, 0.0001f);
-    float norm = std::clamp((*value - min_value) / span, 0.f, 1.f);
-    if (visual_center > min_value && visual_center < max_value) {
-        if (*value <= visual_center) {
-            norm = 0.5f * std::clamp((*value - min_value) / (visual_center - min_value), 0.f, 1.f);
-        } else {
-            norm = 0.5f + 0.5f * std::clamp((*value - visual_center) / (max_value - visual_center), 0.f, 1.f);
+    const bool bipolar = visual_center > min_value && visual_center < max_value;
+    const float norm = knob_norm(*value, min_value, max_value, visual_center);
+    const float reset_norm = knob_norm(reset, min_value, max_value, visual_center);
+    const float a0 = knob_angle(0.f);
+    const float a1 = knob_angle(1.f);
+    const float a_val = knob_angle(norm);
+    const float a_reset = knob_angle(reset_norm);
+    const float a_mid = knob_angle(0.5f);
+
+    // Outer ring track + value arc (not a linear bar under the knob).
+    const float track_r = size * 0.44f;
+    const float face_r = size * 0.30f;
+    const float track_thick = std::max(2.2f * ui_scale(), size * 0.075f);
+    const int arc_segments = std::max(24, static_cast<int>(size * 0.9f));
+    const ImU32 track_col = paint(IM_COL32(36, 36, 36, 255), disabled);
+    const ImU32 fill_col = paint(hovered ? IM_COL32(230, 230, 230, 255) : IM_COL32(200, 200, 200, 255), disabled);
+    const ImU32 face_col = paint(IM_COL32(52, 52, 52, 255), disabled);
+    const ImU32 face_edge = paint(IM_COL32(18, 18, 18, 255), disabled);
+    const ImU32 needle_col = paint(IM_COL32(242, 242, 242, 255), disabled);
+    const ImU32 reset_col = paint(IM_COL32(160, 160, 160, 255), disabled);
+
+    draw->PathClear();
+    draw->PathArcTo(center, track_r, a0, a1, arc_segments);
+    draw->PathStroke(track_col, ImDrawFlags_None, track_thick);
+
+    if (bipolar) {
+        if (std::fabs(norm - 0.5f) > 0.002f) {
+            const float lo = std::min(a_mid, a_val);
+            const float hi = std::max(a_mid, a_val);
+            draw->PathClear();
+            draw->PathArcTo(center, track_r, lo, hi, arc_segments);
+            draw->PathStroke(fill_col, ImDrawFlags_None, track_thick);
         }
+    } else if (norm > 0.002f) {
+        draw->PathClear();
+        draw->PathArcTo(center, track_r, a0, a_val, arc_segments);
+        draw->PathStroke(fill_col, ImDrawFlags_None, track_thick);
     }
-    const float angle = -1.5707963f + (norm - 0.5f) * 4.712389f;
+
+    // Reset tick overlaps the scale ring (radial mark through the track).
+    const float tick_half = track_thick * 0.85f;
+    const float tick_w = std::max(1.4f * ui_scale(), size * 0.035f);
+    const float cos_r = std::cos(a_reset);
+    const float sin_r = std::sin(a_reset);
     draw->AddLine(
-        center, ImVec2(center.x + std::cos(angle) * radius * 0.72f, center.y + std::sin(angle) * radius * 0.72f),
-        paint(IM_COL32(242, 242, 242, 255), disabled), 2.f);
+        ImVec2(center.x + cos_r * (track_r - tick_half), center.y + sin_r * (track_r - tick_half)),
+        ImVec2(center.x + cos_r * (track_r + tick_half), center.y + sin_r * (track_r + tick_half)),
+        reset_col, tick_w);
+
+    // Cap body + needle.
+    draw->AddCircleFilled(center, face_r, face_col, 28);
+    draw->AddCircle(center, face_r, face_edge, 28, 1.5f * ui_scale());
+    const float needle_len = face_r * 0.78f;
+    draw->AddLine(
+        center,
+        ImVec2(center.x + std::cos(a_val) * needle_len, center.y + std::sin(a_val) * needle_len), needle_col,
+        std::max(1.5f * ui_scale(), size * 0.045f));
+    draw->AddCircleFilled(center, std::max(1.4f * ui_scale(), size * 0.04f), needle_col, 10);
+
     ImGui::PopID();
     return changed;
 }
@@ -902,6 +887,114 @@ void draw_meter_bars(ImDrawList* draw, ImVec2 origin, float width, float height,
     }
 }
 
+float verify_label_width() {
+    // Fixed plate width for 原音 / MIDI — not sized from glyph width.
+    return 40.f * ui_scale();
+}
+
+float verify_submix_width() {
+    const float scale = ui_scale();
+    const float label_w = verify_label_width();
+    const float knob = SmallKnob::diameter();
+    const float gap = 4.f * scale;
+    const float margin = 2.f * scale; // small pad after solo
+    // label | vol + pan + mute + solo | margin
+    return label_w + gap + knob * 2.f + SmallButton::width() * 2.f + gap * 3.f + margin;
+}
+
+void draw_verify_lane(App& app, App::VerifyLaneUi& lane, App::VerifyLaneUi& other, const char* id, const char* label, float width, float height) {
+    ImGui::PushID(id);
+    const float scale = ui_scale();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const bool disabled = item_locked();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 corner(origin.x + width, origin.y + height);
+    draw->AddRectFilled(origin, corner, paint(IM_COL32(28, 28, 28, 255), disabled));
+
+    const float label_w = verify_label_width();
+    draw->AddRectFilled(origin, ImVec2(origin.x + label_w, corner.y), paint(IM_COL32(48, 48, 48, 255), disabled));
+    const ImVec2 name_size = ImGui::CalcTextSize(label);
+    draw->AddText(
+        ImVec2(origin.x + (label_w - name_size.x) * 0.5f, origin.y + (height - name_size.y) * 0.5f),
+        paint(IM_COL32(220, 220, 220, 255), disabled), label);
+
+    const float knob_size = std::min(SmallKnob::diameter(), std::max(18.f * scale, height - 4.f * scale));
+    const float button_h = SmallButton::height();
+    const float gap = 4.f * scale;
+    const float cluster_h = std::max(knob_size, button_h);
+    const float cluster_x = origin.x + label_w + gap;
+    const float cluster_y = origin.y + (height - cluster_h) * 0.5f;
+    const float knob_y = cluster_y + (cluster_h - knob_size) * 0.5f;
+    const float button_y = cluster_y + (cluster_h - button_h) * 0.5f;
+
+    ImGui::SetCursorScreenPos(ImVec2(cluster_x, knob_y));
+    float db = lane.db;
+    if (knob(app, "vol", &db, -60.f, 6.f, 0.f, 0.45f, t("master"), NAN, knob_size)) {
+        lane.db = db;
+    }
+    float x = cluster_x + knob_size + gap;
+    ImGui::SetCursorScreenPos(ImVec2(x, knob_y));
+    float pan = lane.pan;
+    if (knob(app, "pan", &pan, -1.f, 1.f, 0.f, 0.012f, "Pan", 0.f, knob_size)) {
+        lane.pan = pan;
+    }
+    x += knob_size + gap;
+    ImGui::SetCursorScreenPos(ImVec2(x, button_y));
+    if (SmallButton("mute", lane.mute ? Icon::SpeakerOff : Icon::Speaker).engaged(lane.mute).tip(t("mute")).draw()) {
+        lane.mute = !lane.mute;
+    }
+    x += SmallButton::width() + gap;
+    ImGui::SetCursorScreenPos(ImVec2(x, button_y));
+    if (SmallButton("solo", Icon::Solo).engaged(lane.solo).tip(t("solo")).draw()) {
+        lane.solo = !lane.solo;
+        if (lane.solo) {
+            other.solo = false;
+        }
+    }
+    const bool audible = !lane.mute && (!(lane.solo || other.solo) || lane.solo);
+    if (!audible) {
+        draw->AddRectFilled(origin, corner, paint(IM_COL32(0, 0, 0, 150), disabled));
+    }
+    draw->AddRect(origin, corner, paint(IM_COL32(22, 22, 22, 255), disabled));
+    ImGui::PopID();
+}
+
+void verify_pitch_range(const App& app, int stem, int& lo, int& hi) {
+    // Bass / guitar stems use their fret ranges; others use the piano/roll key range.
+    if (stem == 1) {
+        lo = app.bass_pitch_min;
+        hi = app.bass_pitch_max;
+    } else if (stem == 4) {
+        lo = app.guitar_pitch_min;
+        hi = app.guitar_pitch_max;
+    } else {
+        lo = app.key_min;
+        hi = app.key_max;
+    }
+    if (lo > hi) {
+        std::swap(lo, hi);
+    }
+}
+
+// Sub mixer only (two stacked lanes). Waveform is drawn by the stem strip to the right.
+void draw_verify_submix(App& app, int stem, float width, float height) {
+    App::VerifyStemUi& verify = app.verify[static_cast<std::size_t>(stem)];
+    const float scale = ui_scale();
+    const float row_gap = 2.f * scale;
+    const float row_h = std::max(1.f, (height - row_gap) * 0.5f);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::PushID(stem);
+    ImGui::SetCursorScreenPos(origin);
+    draw_verify_lane(app, verify.original, verify.midi, "verify-orig", t("verify_original"), width, row_h);
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + row_h + row_gap));
+    draw_verify_lane(app, verify.midi, verify.original, "verify-midi", t("verify_midi"), width, row_h);
+    ImGui::PopID();
+}
+
+void select_strip(App& app, int stem) {
+    app.selected = stem;
+}
+
 void draw_strip(
     App& app, const bt::SongSnapshot& song, const bt::Player::Snapshot& transport, double length, bool ready, int stem,
     float width, float height) {
@@ -910,10 +1003,7 @@ void draw_strip(
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton("row", ImVec2(width, height));
-    if (ImGui::IsItemClicked()) {
-        app.selected = stem;
-    }
-    const bool selected = app.selected == stem;
+    const bool row_clicked = ImGui::IsItemClicked();
     const bool audible = stem_audible(song, stem);
     const bool disabled = item_locked();
     ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -921,25 +1011,40 @@ void draw_strip(
     draw->AddRectFilled(origin, corner, paint(IM_COL32(36, 36, 36, 255), disabled));
 
     const float plate_w = 72.f * scale;
+    const bool selected = app.selected == stem;
     draw->AddRectFilled(origin, ImVec2(origin.x + plate_w, corner.y), paint(kStemColor[stem], disabled));
-    const char* name = tr(kStems[stem], app.language);
+    const char* name = stem_label(stem);
     const ImVec2 name_size = ImGui::CalcTextSize(name);
     draw->AddText(
-        ImVec2(origin.x + (plate_w - name_size.x) * 0.5f, origin.y + (height - name_size.y) * 0.5f), paint(kStemInk[stem], disabled), name);
+        ImVec2(origin.x + (plate_w - name_size.x) * 0.5f, origin.y + (height - name_size.y) * 0.5f),
+        paint(kStemInk[stem], disabled), name);
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::InvisibleButton("label", ImVec2(plate_w, height));
+    const bool label_clicked = ImGui::IsItemClicked();
 
     const float knob_size = MediumKnob::diameter();
     const float button = MediumButton::width();
     const float meter_w = LevelMeter::bar_width();
     const float right_w = knob_size * 2.f + button + meter_w * 2.f + 36.f * scale;
-    const float wave_x = origin.x + plate_w + 8.f * scale;
-    const float wave_w = std::max(48.f, width - plate_w - right_w - 16.f * scale);
+    const float sub_gap = 6.f * scale;
+    const float sub_w = verify_submix_width();
+    // name | submix (原音/MIDI) | single wave | main strip controls
+    const float content_x = origin.x + plate_w + 8.f * scale;
+    const float wave_x = content_x + sub_w + sub_gap;
+    const float wave_w = std::max(48.f, width - (wave_x - origin.x) - right_w - 8.f * scale);
     const float wave_h = std::max(24.f, height - 12.f * scale);
-    ImGui::SetCursorScreenPos(ImVec2(wave_x, origin.y + (height - wave_h) * 0.5f));
+    const float wave_y = origin.y + (height - wave_h) * 0.5f;
+
+    ImGui::SetCursorScreenPos(ImVec2(content_x, wave_y));
+    draw_verify_submix(app, stem, sub_w, wave_h);
+
+    ImGui::SetCursorScreenPos(ImVec2(wave_x, wave_y));
     draw_wave(
-        app, "stem", stem, app.stem_peaks[static_cast<std::size_t>(stem)], song_wave_scale(app),
-        kStemColor[stem], ImVec2(wave_w, wave_h), transport, length, ready, false);
-    if (ImGui::IsItemClicked()) {
-        app.selected = stem;
+        app, "stem", stem, app.stem_peaks[static_cast<std::size_t>(stem)], song_wave_scale(app), kStemColor[stem],
+        ImVec2(wave_w, wave_h), transport, length, ready, false);
+    const bool wave_clicked = ImGui::IsItemClicked();
+    if (label_clicked || wave_clicked || row_clicked) {
+        select_strip(app, stem);
     }
 
     float x = wave_x + wave_w + 8.f * scale;
@@ -950,12 +1055,12 @@ void draw_strip(
             .range(-60.f, 6.f)
             .reset(0.f)
             .sensitivity(0.45f)
-            .tip(tr(kMaster, app.language))
+            .tip(t("master"))
             .caption(format_db)
             .draw(app)) {
         app.gain_db[static_cast<std::size_t>(stem)] = db;
         app.session->set_gain(stem, db_to_gain(db));
-        app.selected = stem;
+        select_strip(app, stem);
     }
 
     x += knob_size + 6.f * scale;
@@ -964,22 +1069,22 @@ void draw_strip(
     if (MediumKnob("pan", &pan).range(-1.f, 1.f).reset(0.f).sensitivity(0.012f).tip("Pan").caption(format_pan).draw(app)) {
         app.pan[static_cast<std::size_t>(stem)] = pan;
         app.session->set_pan(stem, pan);
-        app.selected = stem;
+        select_strip(app, stem);
     }
 
     x += knob_size + 6.f * scale;
     const float button_h = MediumButton::height();
     ImGui::SetCursorScreenPos(ImVec2(x, control_y));
     const bool mute = song.mute[static_cast<std::size_t>(stem)];
-    if (MediumButton("mute", mute ? Icon::SpeakerOff : Icon::Speaker).engaged(mute).tip(tr(kMute, app.language)).draw()) {
+    if (MediumButton("mute", mute ? Icon::SpeakerOff : Icon::Speaker).engaged(mute).tip(t("mute")).draw()) {
         app.session->set_mute(stem, !mute);
-        app.selected = stem;
+        select_strip(app, stem);
     }
     ImGui::SetCursorScreenPos(ImVec2(x, control_y + button_h + 2.f));
     const bool solo = song.solo[static_cast<std::size_t>(stem)];
-    if (MediumButton("solo", Icon::Solo).engaged(solo).tip(tr(kSolo, app.language)).draw()) {
+    if (MediumButton("solo", Icon::Solo).engaged(solo).tip(t("solo")).draw()) {
         app.session->set_solo(stem, !solo);
-        app.selected = stem;
+        select_strip(app, stem);
     }
 
     x += button + 8.f * scale;
@@ -1014,22 +1119,6 @@ void push_metronome(App& app) {
     app.player->set_metronome(app.metro, app.bpm, app.click_db, app.beat_offset, true, app.beat_times);
 }
 
-void start_or_pause(App& app, const bt::Player::Snapshot& transport) {
-    if (transport.playing) {
-        app.player->pause();
-        return;
-    }
-    if (transport.counting) {
-        app.player->play();
-        return;
-    }
-    if (app.count_in) {
-        app.player->count_in(4);
-        return;
-    }
-    app.player->play();
-}
-
 PitchDraft pitch_preset(int stem) {
     const bt::PitchParameters parameters = bt::pitch_parameters_for_stem(stem);
     PitchDraft draft;
@@ -1040,11 +1129,6 @@ PitchDraft pitch_preset(int stem) {
     draft.max_hz = static_cast<int>(std::lround(parameters.maximum_frequency));
     draft.melodia = parameters.melodia;
     return draft;
-}
-
-bool same_pitch(const PitchDraft& left, const PitchDraft& right) {
-    return std::fabs(left.onset - right.onset) < 0.001f && std::fabs(left.frame - right.frame) < 0.001f && left.min_ms == right.min_ms &&
-           left.min_hz == right.min_hz && left.max_hz == right.max_hz && left.melodia == right.melodia;
 }
 
 void seed_shell(App& app) {
@@ -1064,7 +1148,6 @@ const char* project_name(const App& app) {
     return app.projects[static_cast<std::size_t>(app.project_index)].name.c_str();
 }
 
-int fold_language = 0;
 
 void caption_hundredths(float value, char* text, std::size_t size) {
     std::snprintf(text, size, "%.2f", snap_value(value, 0.f, 1.f, 0.01f));
@@ -1077,7 +1160,7 @@ void caption_ms(float value, char* text, std::size_t size) {
 void caption_hz(float value, char* text, std::size_t size) {
     const int hz = static_cast<int>(std::lround(value));
     if (hz <= 0) {
-        std::snprintf(text, size, "%s", tr(kUnlimited, fold_language));
+        std::snprintf(text, size, "%s", t("unlimited"));
         return;
     }
     std::snprintf(text, size, "%d", hz);
@@ -1167,7 +1250,8 @@ struct LabeledKnobSize {
 };
 
 LabeledKnobSize labeled_knob_size(const char* label, const char* shown) {
-    const float column = std::max(MediumKnob::diameter(), std::max(ImGui::CalcTextSize(label).x, ImGui::CalcTextSize(shown).x));
+    const float column = std::max(
+        MediumKnob::column_width(shown), std::max(ImGui::CalcTextSize(label).x, ImGui::CalcTextSize(shown).x));
     const float height = ImGui::GetTextLineHeight() + 2.f * ui_scale() + MediumKnob::height();
     return {column, height};
 }
@@ -1184,7 +1268,15 @@ bool labeled_medium_knob(
     ImGui::GetWindowDrawList()->AddText(
         ImVec2(start.x + (column - label_size.x) * 0.5f, start.y), paint(IM_COL32(141, 141, 141, 255), disabled), label);
     ImGui::SetCursorScreenPos(ImVec2(start.x, start.y + label_h + gap));
-    return MediumKnob(id, value).range(min_value, max_value).reset(reset).sensitivity(sensitivity).tip(label).enabled(enabled).column(column).caption(caption).draw(app);
+    return MediumKnob(id, value)
+        .range(min_value, max_value)
+        .reset(reset)
+        .sensitivity(sensitivity)
+        .tip(label)
+        .enabled(enabled)
+        .column(column)
+        .caption(caption)
+        .draw(app);
 }
 
 void flow_float_knob(
@@ -1258,29 +1350,12 @@ void flow_toggle(FoldFlow& flow, const char* id, const char* label, bool* value,
     });
 }
 
-void draw_pitch_body(App& app, int stem) {
-    fold_language = app.language;
-    PitchDraft& draft = app.pitch_draft[static_cast<std::size_t>(stem)];
-    FoldFlow row = FoldFlow::begin();
-    flow_float_knob(row, app, "onset", tr(kOnset, app.language), &draft.onset, 0.f, 1.f, 0.01f, 0.2f, caption_hundredths);
-    flow_float_knob(row, app, "frame", tr(kFrame, app.language), &draft.frame, 0.f, 1.f, 0.01f, 0.2f, caption_hundredths);
-    flow_int_knob(row, app, "min-ms", tr(kMinMs, app.language), &draft.min_ms, 20, 2000, 128, caption_ms);
-    flow_int_knob(row, app, "min-hz", tr(kMinHz, app.language), &draft.min_hz, 0, 2000, 0, caption_hz);
-    flow_int_knob(row, app, "max-hz", tr(kMaxHz, app.language), &draft.max_hz, 0, 2000, 0, caption_hz);
-    flow_toggle(row, "melodia", tr(kMelodia, app.language), &draft.melodia);
-    row.end();
-}
-
 void draw_fold_body(App& app, int kind, int stem) {
-    fold_language = app.language;
-    if (kind == 0) {
-        draw_pitch_body(app, stem);
-        return;
-    }
+    (void)stem;
     if (kind == 1) {
         FoldFlow look = FoldFlow::begin();
-        flow_int_knob(look, app, "frets", tr(kFrets, app.language), &app.fret_count, 12, 24, 22, caption_int);
-        flow_int_knob(look, app, "bright", tr(kBright, app.language), &app.fret_bright, 1, 127, 100, caption_int);
+        flow_int_knob(look, app, "frets", t("frets"), &app.fret_count, 12, 24, 22, caption_int);
+        flow_int_knob(look, app, "bright", t("bright"), &app.fret_bright, 1, 127, 100, caption_int);
         look.end();
         app.fret_prefer = std::clamp(app.fret_prefer, 0, app.fret_count);
         return;
@@ -1298,39 +1373,38 @@ void draw_fold_body(App& app, int kind, int stem) {
             *pitch_max = std::clamp(*pitch_max, low, high);
             const char* min_id = bass ? "bass-min" : "guitar-min";
             const char* max_id = bass ? "bass-max" : "guitar-max";
-            flow_int_knob(range, app, min_id, tr(kPitchMin, app.language), pitch_min, low, high, low, caption_note);
-            flow_int_knob(range, app, max_id, tr(kPitchMax, app.language), pitch_max, low, high, high, caption_note);
+            flow_int_knob(range, app, min_id, t("pitch_min"), pitch_min, low, high, low, caption_note);
+            flow_int_knob(range, app, max_id, t("pitch_max"), pitch_max, low, high, high, caption_note);
         } else {
-            flow_int_knob(range, app, "key-min", tr(kPitchMin, app.language), &app.key_min, 21, 108, 21, caption_note);
-            flow_int_knob(range, app, "key-max", tr(kPitchMax, app.language), &app.key_max, 21, 108, 108, caption_note);
+            flow_int_knob(range, app, "key-min", t("pitch_min"), &app.key_min, 21, 108, 21, caption_note);
+            flow_int_knob(range, app, "key-max", t("pitch_max"), &app.key_max, 21, 108, 108, caption_note);
         }
-        flow_toggle(range, "pitch-mask", tr(kPitchMask, app.language), &app.pitch_mask);
         range.end();
         return;
     }
     app.fret_prefer = std::clamp(app.fret_prefer, 0, std::max(1, app.fret_count));
     FoldFlow hand = FoldFlow::begin();
     const bool suggested = app.fret_suggest;
-    flow_toggle(hand, "suggest", tr(kModeSuggest, app.language), &app.fret_suggest);
-    flow_int_knob(hand, app, "prefer", tr(kPrefer, app.language), &app.fret_prefer, 0, std::max(1, app.fret_count), 0, caption_int, suggested);
-    flow_toggle(hand, "open", tr(kAllowOpen, app.language), &app.fret_allow_open, suggested);
-    flow_toggle(hand, "alt", tr(kShowAlt, app.language), &app.fret_show_alt, suggested);
-    flow_toggle(hand, "harmonic", tr(kHarmonic, app.language), &app.fret_harmonic);
+    flow_toggle(hand, "suggest", t("mode_suggest"), &app.fret_suggest);
+    flow_int_knob(hand, app, "prefer", t("prefer"), &app.fret_prefer, 0, std::max(1, app.fret_count), 0, caption_int, suggested);
+    flow_toggle(hand, "open", t("allow_open"), &app.fret_allow_open, suggested);
+    flow_toggle(hand, "alt", t("show_alt"), &app.fret_show_alt, suggested);
+    flow_toggle(hand, "harmonic", t("harmonic"), &app.fret_harmonic);
     hand.end();
 }
 
 void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::Snapshot& transport, double length, bool ready, float stage_h) {
     const float scale = ui_scale();
     const int stem = std::clamp(app.selected, 0, bt::kStemCount - 1);
-    const char* views[] = {tr(kGuitarView, app.language), tr(kBassView, app.language), tr(kRoll, app.language), tr(kFall, app.language)};
-    const MidiView modes[] = {MidiView::Guitar, MidiView::Bass, MidiView::Roll, MidiView::Fall};
-    const char* view_ids[] = {"view-guitar", "view-bass", "view-roll", "view-fall"};
+    const char* views[] = {t("guitar_view"), t("bass_view"), t("fall")};
+    const MidiView modes[] = {MidiView::Guitar, MidiView::Bass, MidiView::Fall};
+    const char* view_ids[] = {"view-guitar", "view-bass", "view-fall"};
     const float row_y = 6.f * scale;
     const float view_h = PlayerButton::height();
     const float view_pad = 10.f * scale;
     SideRow views_row(SideRow::Dock::Right);
     views_row.margin(8.f * scale);
-    for (int index = 0; index < 4; ++index) {
+    for (int index = 0; index < 3; ++index) {
         const float view_w = text_button_width(views[index], PlayerButton::width(), view_pad);
         views_row.item(view_w, view_h, index == 0 ? -1.f : 4.f * scale, [&, index, view_w] {
             if (text_button(view_ids[index], views[index], app.midi_view == modes[index], true, view_w, view_h, 8.f * scale)) {
@@ -1343,21 +1417,19 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
     const char* opened = project_name(app);
     if (opened[0] != '\0') {
         ImGui::TextUnformatted(opened);
-        ImGui::SameLine();
     }
-    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(kHi), "%s", tr(kStems[stem], app.language));
     ImGui::SetCursorPos(ImVec2(10.f * scale, row_y + row_h + 6.f * scale));
     if (!app.model_note.empty() && song.phase != bt::SongPhase::Ready) {
         ImGui::NewLine();
         ImGui::SetCursorPosX(10.f * scale);
-        ImGui::TextDisabled("%s", app.model_note.c_str());
+        ImGui::TextDisabled("%s", stored(app.model_note));
     }
     const auto note_state = app.note_status[static_cast<std::size_t>(stem)];
     if (note_state == NoteStatus::Failed) {
         ImGui::NewLine();
         ImGui::SetCursorPosX(10.f * scale);
         if (app.note_detail[static_cast<std::size_t>(stem)].empty()) {
-            ImGui::TextDisabled("%s", tr(kPitchMissing, app.language));
+            ImGui::TextDisabled("%s", t("pitch_missing"));
         } else {
             ImGui::TextDisabled("%s", app.note_detail[static_cast<std::size_t>(stem)].c_str());
         }
@@ -1370,15 +1442,14 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
         bool* open;
         int kind;
     };
-    const PitchDraft& draft = app.pitch_draft[static_cast<std::size_t>(stem)];
-    const bool dirty = !same_pitch(draft, app.pitch_applied[static_cast<std::size_t>(stem)]);
+    // Pitch/BP knobs removed: decode uses pitch_parameters_for_stem only.
     Column columns[4] = {
-        {"pitch", tr(kPitchFold, app.language), &app.fold_pitch, 0},
-        {"look", tr(kLook, app.language), &app.fold_look, 1},
-        {"range", tr(kRange, app.language), &app.fold_range, 2},
-        {"hand", tr(kHand, app.language), &app.fold_hand, 3},
+        {"pitch", t("pitch_fold"), &app.fold_pitch, 0},
+        {"look", t("look"), &app.fold_look, 1},
+        {"range", t("range"), &app.fold_range, 2},
+        {"hand", t("hand"), &app.fold_hand, 3},
     };
-    const int shown_kinds[] = {0, fret ? 1 : -1, 2, fret ? 3 : -1};
+    const int shown_kinds[] = {fret ? 1 : -1, 2, fret ? 3 : -1};
     int shown = 0;
     int visible[4];
     for (int kind : shown_kinds) {
@@ -1388,9 +1459,9 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
     }
     const float gap = 3.f * scale;
     const float header_h = std::max(28.f * scale, MediumButton::height() + 4.f * scale);
-    const float controls_w = MediumButton::width() + 8.f * scale;
     const float inner_w = std::max(1.f, ImGui::GetWindowWidth() - 20.f * scale);
-    const float col_w = (inner_w - gap * static_cast<float>(shown - 1)) / static_cast<float>(shown);
+    const float col_w =
+        shown > 0 ? (inner_w - gap * static_cast<float>(shown - 1)) / static_cast<float>(shown) : inner_w;
     const ImVec2 row = ImGui::GetCursorScreenPos();
     ImGui::Dummy(ImVec2(inner_w, header_h));
     const ImVec2 after_headers = ImGui::GetCursorScreenPos();
@@ -1408,8 +1479,7 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
         const ImVec2 origin(row.x + static_cast<float>(slot) * (col_w + gap), row.y);
         ImGui::SetCursorScreenPos(origin);
         ImGui::PushID(column.id);
-        const float head_w = kind == 0 ? std::max(1.f, col_w - controls_w) : col_w;
-        ImGui::InvisibleButton("head", ImVec2(head_w, header_h));
+        ImGui::InvisibleButton("head", ImVec2(col_w, header_h));
         if (ImGui::IsItemClicked()) {
             *column.open = !*column.open;
         }
@@ -1420,13 +1490,6 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
         const bool header_off = item_locked();
         draw->AddText(ImVec2(origin.x + 8.f * scale, origin.y + (header_h - ImGui::GetTextLineHeight()) * 0.5f), paint(*column.open ? kHi : IM_COL32(141, 141, 141, 255), header_off), chevron);
         draw->AddText(ImVec2(origin.x + 22.f * scale, origin.y + (header_h - ImGui::GetTextLineHeight()) * 0.5f), paint(kHi, header_off), column.title);
-        if (kind == 0) {
-            ImGui::SetCursorScreenPos(ImVec2(origin.x + col_w - MediumButton::width() - 8.f * scale, origin.y + (header_h - MediumButton::height()) * 0.5f));
-            if (MediumButton("rerun", Icon::Rerun).engaged(dirty).tip(tr(kRerun, app.language)).draw()) {
-                app.pitch_applied[static_cast<std::size_t>(stem)] = app.pitch_draft[static_cast<std::size_t>(stem)];
-                rerun_notes(app, stem);
-            }
-        }
         heads[slot] = {origin, kind, *column.open, ImVec2(0.f, 0.f), ImVec2(0.f, 0.f)};
         ImGui::PopID();
     }
@@ -1509,13 +1572,7 @@ std::string separation_caption(const ProjectItem& item) {
 }
 
 void copy_project(ProjectItem& item, const bt::ProjectEntry& entry) {
-    item.name = entry.name;
-    item.seconds = entry.seconds;
-    item.hash = entry.hash;
-    item.directory = entry.directory;
-    item.source = entry.source;
-    item.model_key = entry.model_key;
-    item.device = entry.device;
+    item = entry;
 }
 
 void open_project(App& app, const ProjectItem& item) {
@@ -1663,21 +1720,21 @@ void draw_settings_panel(App& app, bool busy, float height) {
     if (busy) {
         ImGui::BeginDisabled();
     }
-    ImGui::TextUnformatted(tr(kLanguage, app.language));
-    const char* languages[] = {"繁體中文", "简体中文", "English"};
+    ImGui::TextUnformatted(t("language"));
+    const char* languages[] = {t("settings.lang_hant"), t("settings.lang_hans"), t("settings.lang_en")};
     fill_item_width();
     if (ImGui::BeginCombo("##language", languages[app.language])) {
         for (int index = 0; index < 3; ++index) {
             if (ImGui::Selectable(languages[index], app.language == index)) {
-                app.language = index;
+                set_language(app, index);
                 save_language(app);
             }
         }
         ImGui::EndCombo();
     }
     ImGui::Spacing();
-    ImGui::TextDisabled("%s", tr(kAudio, app.language));
-    ImGui::TextUnformatted(tr(kOutput, app.language));
+    ImGui::TextDisabled("%s", t("audio"));
+    ImGui::TextUnformatted(t("output"));
     refresh_outputs(app);
     const int shown = std::clamp(app.output_device, 0, static_cast<int>(app.outputs.size()) - 1);
     fill_item_width();
@@ -1705,8 +1762,8 @@ void draw_settings_panel(App& app, bool busy, float height) {
         ImGui::EndCombo();
     }
     ImGui::Spacing();
-    ImGui::TextDisabled("%s", app.language == 2 ? "Performance" : app.language == 1 ? "性能" : "效能");
-    ImGui::TextUnformatted(app.language == 2 ? "Note workers" : app.language == 1 ? "转谱并行" : "轉譜並行");
+    ImGui::TextDisabled("%s", t("settings.performance"));
+    ImGui::TextUnformatted(t("settings.note_workers"));
     fill_item_width();
     if (ImGui::SliderInt("##note-workers", &app.note_workers, 1, 8)) {
         app.note_workers = std::clamp(app.note_workers, 1, 8);
@@ -1719,7 +1776,7 @@ void draw_settings_panel(App& app, bool busy, float height) {
     if (!cpu_threads) {
         ImGui::BeginDisabled();
     }
-    ImGui::TextUnformatted(app.language == 2 ? "Separation threads" : app.language == 1 ? "分轨线程" : "分軌執行緒");
+    ImGui::TextUnformatted(t("settings.separation_threads"));
     fill_item_width();
     if (ImGui::SliderInt("##separation-threads", &app.demucs_threads, 1, 16)) {
         app.demucs_threads = std::clamp(app.demucs_threads, 1, 16);
@@ -1732,8 +1789,8 @@ void draw_settings_panel(App& app, bool busy, float height) {
         ImGui::EndDisabled();
     }
     ImGui::Spacing();
-    ImGui::TextDisabled("%s", tr(kSeparation, app.language));
-    ImGui::TextUnformatted(tr(kSeparationModel, app.language));
+    ImGui::TextDisabled("%s", t("separation"));
+    ImGui::TextUnformatted(t("separation_model"));
     const std::vector<BackendStatus> backends = app.engine == nullptr ? std::vector<BackendStatus>{} : app.engine->backends();
     const std::string model_preview_owned = model_label(app.separation_model);
     const char* model_preview = model_preview_owned.c_str();
@@ -1757,9 +1814,9 @@ void draw_settings_panel(App& app, bool busy, float height) {
         }
         ImGui::EndCombo();
     }
-    ImGui::TextUnformatted(tr(kInferenceDevice, app.language));
+    ImGui::TextUnformatted(t("inference_device"));
     const bool cuda_backend = app.separation_model != "htdemucs_6s";
-    const char* device_labels[] = {tr(kDeviceAuto, app.language), tr(kDeviceCpu, app.language), tr(kDeviceCuda, app.language)};
+    const char* device_labels[] = {t("device_auto"), t("device_cpu"), t("device_cuda")};
     const int preference = std::clamp(app.separation_preference, 0, 2);
     const char* device_preview = cuda_backend ? device_labels[preference] : device_labels[1];
     if (!cuda_backend) {
@@ -1780,7 +1837,7 @@ void draw_settings_panel(App& app, bool busy, float height) {
     }
     if (!app.model_note.empty()) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
-        ImGui::TextWrapped("%s", app.model_note.c_str());
+        ImGui::TextWrapped("%s", stored(app.model_note));
         ImGui::PopTextWrapPos();
     } else if (!app.separation_device.empty()) {
         ImGui::TextDisabled("%s", app.separation_device.c_str());
@@ -1791,7 +1848,7 @@ void draw_settings_panel(App& app, bool busy, float height) {
     if (busy) {
         ImGui::BeginDisabledOverrideReenable();
     }
-    if (MediumButton("monitor", Icon::Monitor).engaged(app.monitor_open).tip(tr(kMonitor, app.language)).draw()) {
+    if (MediumButton("monitor", Icon::Monitor).engaged(app.monitor_open).tip(t("monitor")).draw()) {
         app.monitor_open = true;
     }
     if (busy) {
@@ -1819,7 +1876,7 @@ void draw_projects(App& app, const bt::SongSnapshot& song, double length, float 
     ImGui::SetCursorPos(ImVec2(side, btn_y));
     const ImVec2 projects_origin = ImGui::GetCursorScreenPos();
     ImGui::PushClipRect(projects_origin, ImVec2(projects_origin.x + switch_w, projects_origin.y + btn_h), true);
-    if (text_button("side-projects", tr(kProjects, app.language), !app.settings_panel, true, switch_w, btn_h, 6.f * scale) &&
+    if (text_button("side-projects", t("projects"), !app.settings_panel, true, switch_w, btn_h, 6.f * scale) &&
         app.settings_panel) {
         app.settings_panel = false;
         app.keymap_capture = -1;
@@ -1828,13 +1885,13 @@ void draw_projects(App& app, const bt::SongSnapshot& song, double length, float 
     ImGui::SetCursorPos(ImVec2(side + switch_w + gap, btn_y));
     const ImVec2 settings_origin = ImGui::GetCursorScreenPos();
     ImGui::PushClipRect(settings_origin, ImVec2(settings_origin.x + switch_w, settings_origin.y + btn_h), true);
-    if (text_button("side-settings", tr(kSettings, app.language), app.settings_panel, true, switch_w, btn_h, 6.f * scale) &&
+    if (text_button("side-settings", t("settings"), app.settings_panel, true, switch_w, btn_h, 6.f * scale) &&
         !app.settings_panel) {
         app.settings_panel = true;
     }
     ImGui::PopClipRect();
     ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth() - side - import_w, btn_y));
-    if (MediumButton("import", Icon::Import).enabled(!busy).tip(tr(kImport, app.language)).draw()) {
+    if (MediumButton("import", Icon::Import).enabled(!busy).tip(t("import")).draw()) {
         if (auto path = pick_audio(app.hwnd)) {
             app.rename_index = -1;
             app.rename_arm = -1.f;
@@ -1940,9 +1997,9 @@ void draw_projects(App& app, const bt::SongSnapshot& song, double length, float 
         draw->AddText(ImVec2(duration_x, text_y), dim, duration);
         const float icon_y = origin.y + (row_h - icon_h) * 0.5f;
         ImGui::SetCursorScreenPos(ImVec2(pencil_x, icon_y));
-        const bool pencil_pressed = MediumButton("pencil", Icon::Pencil).tip(tr(kRename, app.language)).draw();
+        const bool pencil_pressed = MediumButton("pencil", Icon::Pencil).tip(t("rename")).draw();
         ImGui::SetCursorScreenPos(ImVec2(trash_x, icon_y));
-        const bool trash_pressed = MediumButton("trash", Icon::Trash).tip(tr(kDelete, app.language)).draw();
+        const bool trash_pressed = MediumButton("trash", Icon::Trash).tip(t("delete")).draw();
         if (!busy && trash_pressed) {
             remove = index;
         } else if (!busy && pencil_pressed) {
@@ -2175,19 +2232,23 @@ bool MediumButton::draw() const {
 }
 
 bool draw_value_knob(
-    App& app, const char* id, float* value, float size, float gap, float stack, float column, float min_value, float max_value, float reset,
-    float sensitivity, bool centered, float visual_center, const char* tip, void (*caption)(float, char*, std::size_t), bool enabled) {
+    App& app, const char* id, float* value, float size, float gap, float stack, float column, float min_value, float max_value,
+    float reset, float sensitivity, bool centered, float visual_center, const char* tip,
+    void (*caption)(float, char*, std::size_t), bool enabled) {
     ImGui::BeginGroup();
     const ImVec2 start = ImGui::GetCursorScreenPos();
+    const float pad = std::max(3.f * ui_scale(), size * 0.08f);
     ImGui::Dummy(ImVec2(column, stack));
-    ImGui::SetCursorScreenPos(ImVec2(start.x + (column - size) * 0.5f, start.y));
-    const bool changed = knob(app, id, value, min_value, max_value, reset, sensitivity, tip, centered ? visual_center : NAN, size, enabled);
+    ImGui::SetCursorScreenPos(ImVec2(start.x + (column - size) * 0.5f, start.y + pad * 0.25f));
+    const bool changed =
+        knob(app, id, value, min_value, max_value, reset, sensitivity, tip, centered ? visual_center : NAN, size, enabled);
     if (caption != nullptr && value != nullptr) {
         char text[32];
         caption(*value, text, sizeof text);
         const ImVec2 caption_size = ImGui::CalcTextSize(text);
         ImGui::GetWindowDrawList()->AddText(
-            ImVec2(start.x + (column - caption_size.x) * 0.5f, start.y + size + gap), paint(IM_COL32(141, 141, 141, 255), control_disabled(enabled)), text);
+            ImVec2(start.x + (column - caption_size.x) * 0.5f, start.y + size + pad * 0.25f + gap),
+            paint(IM_COL32(141, 141, 141, 255), control_disabled(enabled)), text);
     }
     ImGui::EndGroup();
     return changed;
@@ -2198,19 +2259,22 @@ float SmallKnob::diameter() {
 }
 
 float SmallKnob::height() {
-    return diameter() + ui_scale() + ImGui::GetTextLineHeight();
+    const float pad = std::max(3.f * ui_scale(), diameter() * 0.08f);
+    return diameter() + pad * 0.25f + ui_scale() + ImGui::GetTextLineHeight();
 }
 
 float SmallKnob::column_width(const char* sample) {
+    const float pad = std::max(3.f * ui_scale(), diameter() * 0.08f);
     const float text = sample == nullptr ? 0.f : ImGui::CalcTextSize(sample).x;
-    return std::max(diameter(), text);
+    return std::max(diameter() + pad, text);
 }
 
 bool SmallKnob::draw(App& app) const {
     const float size = diameter();
+    const float column = column_ > 0.f ? column_ : column_width(nullptr);
     return draw_value_knob(
-        app, id_, value_, size, ui_scale(), height(), column_ > 0.f ? column_ : size, min_, max_, reset_, sensitivity_, centered_,
-        visual_center_, tip_, caption_, enabled_);
+        app, id_, value_, size, ui_scale(), height(), column, min_, max_, reset_, sensitivity_, centered_, visual_center_, tip_,
+        caption_, enabled_);
 }
 
 float MediumKnob::diameter() {
@@ -2218,19 +2282,45 @@ float MediumKnob::diameter() {
 }
 
 float MediumKnob::height() {
-    return diameter() + 1.f + ImGui::GetTextLineHeight();
+    const float pad = std::max(3.f * ui_scale(), diameter() * 0.08f);
+    return diameter() + pad * 0.25f + 1.f + ImGui::GetTextLineHeight();
 }
 
 float MediumKnob::column_width(const char* sample) {
+    const float pad = std::max(3.f * ui_scale(), diameter() * 0.08f);
     const float text = sample == nullptr ? 0.f : ImGui::CalcTextSize(sample).x;
-    return std::max(diameter(), text);
+    return std::max(diameter() + pad, text);
 }
 
 bool MediumKnob::draw(App& app) const {
     const float size = diameter();
+    const float column = column_ > 0.f ? column_ : column_width(nullptr);
     return draw_value_knob(
-        app, id_, value_, size, 1.f, height(), column_ > 0.f ? column_ : size, min_, max_, reset_, sensitivity_, centered_,
-        visual_center_, tip_, caption_, enabled_);
+        app, id_, value_, size, 1.f, height(), column, min_, max_, reset_, sensitivity_, centered_, visual_center_, tip_, caption_,
+        enabled_);
+}
+
+float LargeKnob::diameter() {
+    return 48.f * ui_scale();
+}
+
+float LargeKnob::height() {
+    const float pad = std::max(4.f * ui_scale(), diameter() * 0.08f);
+    return diameter() + pad * 0.25f + 2.f * ui_scale() + ImGui::GetTextLineHeight();
+}
+
+float LargeKnob::column_width(const char* sample) {
+    const float pad = std::max(4.f * ui_scale(), diameter() * 0.08f);
+    const float text = sample == nullptr ? 0.f : ImGui::CalcTextSize(sample).x;
+    return std::max(diameter() + pad, text);
+}
+
+bool LargeKnob::draw(App& app) const {
+    const float size = diameter();
+    const float column = column_ > 0.f ? column_ : column_width(nullptr);
+    return draw_value_knob(
+        app, id_, value_, size, 2.f * ui_scale(), height(), column, min_, max_, reset_, sensitivity_, centered_, visual_center_, tip_,
+        caption_, enabled_);
 }
 
 float LevelMeter::bar_width() {
@@ -2268,28 +2358,29 @@ void ProgressBar::draw() const {
     }
     ImGui::PushID(id_);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("bar", ImVec2(width, height));
+    // Dummy avoids InvisibleButton frame/nav chrome that looked like a nested outer box.
+    ImGui::Dummy(ImVec2(width, height));
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImVec2 corner(origin.x + width, origin.y + height);
     const float rounding = std::min(4.f, height * 0.35f);
     draw->AddRectFilled(origin, corner, IM_COL32(17, 17, 17, 255), rounding);
-    const float fill = std::clamp(width * fraction, 0.f, width);
-    if (fill > 1.f) {
+    const float fill_w = std::clamp(width * fraction, 0.f, width);
+    if (fill_w > 1.f) {
         const float inset = 1.f;
-        const float right = fraction >= 1.f ? corner.x - inset : origin.x + fill;
+        const float right = fraction >= 1.f ? corner.x - inset : origin.x + fill_w;
         draw->AddRectFilled(
             ImVec2(origin.x + inset, origin.y + inset), ImVec2(std::max(origin.x + inset + 1.f, right), corner.y - inset),
-            IM_COL32(242, 242, 242, 255), std::max(0.f, rounding - 1.f));
+            fill_, std::max(0.f, rounding - 1.f));
     }
-    draw->AddRect(origin, corner, IM_COL32(242, 242, 242, 255), rounding);
+    draw->AddRect(origin, corner, fill_, rounding);
     if (overlay_ != nullptr && overlay_[0] != '\0') {
         const ImVec2 text = ImGui::CalcTextSize(overlay_);
         const ImVec2 pos(origin.x + (width - text.x) * 0.5f, origin.y + (height - text.y) * 0.5f);
-        draw->PushClipRect(origin, ImVec2(origin.x + fill, corner.y), true);
+        draw->PushClipRect(origin, ImVec2(origin.x + fill_w, corner.y), true);
         draw->AddText(pos, IM_COL32(26, 26, 26, 255), overlay_);
         draw->PopClipRect();
-        draw->PushClipRect(ImVec2(origin.x + fill, origin.y), corner, true);
-        draw->AddText(pos, IM_COL32(242, 242, 242, 255), overlay_);
+        draw->PushClipRect(ImVec2(origin.x + fill_w, origin.y), corner, true);
+        draw->AddText(pos, fill_, overlay_);
         draw->PopClipRect();
     }
     ImGui::PopID();
@@ -2346,12 +2437,15 @@ std::optional<std::filesystem::path> pick_audio(HWND__* hwnd) {
     DWORD options = 0;
     dialog->GetOptions(&options);
     dialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+    const std::wstring filter_audio = tw("dialog.audio_filter");
+    const std::wstring filter_all = tw("dialog.all_files");
+    const std::wstring open_title = tw("dialog.open_song");
     const COMDLG_FILTERSPEC filters[] = {
-        {L"音訊", L"*.wav;*.mp3;*.flac"},
-        {L"所有檔案", L"*.*"},
+        {filter_audio.c_str(), L"*.wav;*.mp3;*.flac"},
+        {filter_all.c_str(), L"*.*"},
     };
     dialog->SetFileTypes(2, filters);
-    dialog->SetTitle(L"開啟歌曲");
+    dialog->SetTitle(open_title.c_str());
     std::optional<std::filesystem::path> result;
     if (SUCCEEDED(dialog->Show(reinterpret_cast<HWND>(hwnd)))) {
         IShellItem* item = nullptr;
@@ -2487,41 +2581,38 @@ void draw(App& app) {
             app.seen_revision = song->revision;
         }
     }
-    {
-        int lo = 0;
-        int hi = 0;
-        viewport_pitch_range(app, lo, hi);
-        const int stem = std::clamp(app.selected, 0, bt::kStemCount - 1);
-        static bool sent_on = false;
-        static int sent_stem = -1;
-        static int sent_lo = 0;
-        static int sent_hi = 0;
-        static std::uint64_t sent_rev = 0;
-        // Harmonic rebuild is heavy; apply while idle so knobs don't recompute every frame.
-        if (!app.pitch_mask) {
-            if (sent_on) {
-                app.player->set_pitch_mask(false, stem, lo, hi, bt::Player::PitchMaskBackend::Harmonic);
-                sent_on = false;
-            }
-        } else if (!ImGui::IsAnyItemActive()) {
+    if (app.player != nullptr) {
+        static std::array<std::uint64_t, bt::kStemCount> cached_rev{};
+        static std::array<std::shared_ptr<const std::vector<bt::MidiSynthNote>>, bt::kStemCount> cached_notes{};
+        for (int stem = 0; stem < bt::kStemCount; ++stem) {
+            const auto index = static_cast<std::size_t>(stem);
+            const App::VerifyStemUi& verify = app.verify[index];
+            bt::Player::VerifyLane original;
+            original.gain = db_to_gain(verify.original.db);
+            original.pan = verify.original.pan;
+            original.mute = verify.original.mute;
+            original.solo = verify.original.solo;
+            bt::Player::VerifyLane midi;
+            midi.gain = db_to_gain(verify.midi.db);
+            midi.pan = verify.midi.pan;
+            midi.mute = verify.midi.mute;
+            midi.solo = verify.midi.solo;
+            int lo = 0;
+            int hi = 0;
+            verify_pitch_range(app, stem, lo, hi);
             const std::uint64_t revision =
-                (app.note_song << 16) ^ (app.note_ticket[static_cast<std::size_t>(stem)] << 8) ^
-                static_cast<std::uint64_t>(app.notes[static_cast<std::size_t>(stem)].size());
-            if (!sent_on || sent_stem != stem || sent_lo != lo || sent_hi != hi || sent_rev != revision) {
-                auto notes = std::make_shared<std::vector<bt::PitchMaskNote>>();
-                notes->reserve(app.notes[static_cast<std::size_t>(stem)].size());
-                for (const MidiNote& note : app.notes[static_cast<std::size_t>(stem)]) {
-                    notes->push_back(bt::PitchMaskNote{note.pitch, note.start, note.end});
+                (app.note_song << 16) ^ (app.note_ticket[index] << 8) ^
+                static_cast<std::uint64_t>(app.notes[index].size());
+            if (cached_rev[index] != revision || !cached_notes[index]) {
+                auto notes = std::make_shared<std::vector<bt::MidiSynthNote>>();
+                notes->reserve(app.notes[index].size());
+                for (const MidiNote& note : app.notes[index]) {
+                    notes->push_back(bt::MidiSynthNote{note.pitch, note.start, note.end, note.velocity});
                 }
-                app.player->set_pitch_mask(
-                    true, stem, lo, hi, bt::Player::PitchMaskBackend::Harmonic, std::move(notes),
-                    revision);
-                sent_on = true;
-                sent_stem = stem;
-                sent_lo = lo;
-                sent_hi = hi;
-                sent_rev = revision;
+                cached_notes[index] = std::move(notes);
+                cached_rev[index] = revision;
             }
+            app.player->set_verify_mix(stem, original, midi, lo, hi, cached_notes[index], revision);
         }
     }
     if (!ImGui::IsAnyItemActive()) {
@@ -2559,7 +2650,8 @@ void draw(App& app) {
         if (count <= 0) {
             return 0.f;
         }
-        return mixer_pad * 2.f + row_body * static_cast<float>(count) + strip_gap * static_cast<float>(count - 1);
+        return mixer_pad * 2.f + row_body * static_cast<float>(count) +
+               strip_gap * static_cast<float>(count - 1);
     };
     const auto fit_tracks = [&](float height) {
         int count = 0;
@@ -2606,39 +2698,40 @@ void draw(App& app) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.102f, 0.102f, 0.102f, 1.f));
     ImGui::BeginChild("topbar", ImVec2(0, top_h), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const bool importing = song->phase == bt::SongPhase::Decoding || song->phase == bt::SongPhase::Separating;
-    int running_note = -1;
-    for (int stem = 0; stem < bt::kStemCount; ++stem) {
-        if (app.note_status[static_cast<std::size_t>(stem)] == NoteStatus::Running) {
-            running_note = stem;
+    const bool can_cancel = importing && app.session != nullptr;
+    bool show_note = false;
+    for (NoteStatus status : app.note_status) {
+        if (status == NoteStatus::Running) {
+            show_note = true;
             break;
         }
     }
     const float pad = 8.f * scale;
     const float edge = 12.f * scale;
     const float cancel_w = MediumButton::width();
-    float content_x = edge;
-    const char* phase = phase_text(song->phase, app.language);
-    if (phase[0] != '\0') {
-        ImGui::SetCursorPos(ImVec2(content_x, (top_h - ImGui::GetTextLineHeight()) * 0.5f));
-        ImGui::TextDisabled("%s", phase);
-        content_x += ImGui::CalcTextSize(phase).x + pad;
-    }
-    float limit = ImGui::GetWindowWidth() - edge;
-    if (importing && app.session != nullptr) {
-        limit -= cancel_w + pad;
-    }
-    const float bar_x = content_x;
-    const float bar_w = limit - bar_x;
+    const float cancel_h = MediumButton::height();
     const float bar_h = std::max(8.f * scale, top_h - 16.f * scale);
-    const bool show_note = running_note >= 0;
-    const bool show_mask = app.player != nullptr && app.player->pitch_mask_building();
-    if ((importing || show_note || show_mask) && bar_w >= 48.f * scale) {
-        const int bars = (importing ? 1 : 0) + (show_note ? 1 : 0) + (show_mask ? 1 : 0);
-        const float gap = 6.f * scale;
-        const float each = (bar_w - gap * static_cast<float>(bars - 1)) / static_cast<float>(bars);
-        float x = bar_x;
-        const auto place_bar = [&](const char* id, float fraction, const char* overlay) {
-            ImGui::SetCursorPos(ImVec2(x, (top_h - bar_h) * 0.5f));
+    const float gap = 6.f * scale;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float row_w = ImGui::GetContentRegionAvail().x;
+    float x = edge;
+    float bar_right = row_w - edge;
+    if (can_cancel) {
+        bar_right -= cancel_w + pad;
+    }
+    // Status text lives only inside the bar overlay — no duplicate label on the left.
+    if (!(importing || show_note)) {
+        const char* phase = phase_text(song->phase, app.language);
+        if (phase[0] != '\0') {
+            ImGui::SetCursorScreenPos(ImVec2(origin.x + x, origin.y + (top_h - ImGui::GetTextLineHeight()) * 0.5f));
+            ImGui::TextDisabled("%s", phase);
+        }
+    } else if (bar_right - x >= 48.f * scale) {
+        const int bars = (importing ? 1 : 0) + (show_note ? 1 : 0);
+        const float each = (bar_right - x - gap * static_cast<float>(bars - 1)) / static_cast<float>(bars);
+        const float bar_y = origin.y + (top_h - bar_h) * 0.5f;
+        auto place_bar = [&](const char* id, float fraction, const char* overlay) {
+            ImGui::SetCursorScreenPos(ImVec2(origin.x + x, bar_y));
             ProgressBar(id, fraction).size(each, bar_h).overlay(overlay).draw();
             x += each + gap;
         };
@@ -2648,28 +2741,19 @@ void draw(App& app) {
             std::snprintf(
                 overlay, sizeof overlay, "%s  %.0f%%", phase_text(song->phase, app.language),
                 std::clamp(fraction, 0.f, 1.f) * 100.f);
-            place_bar("import", fraction, overlay);
+            place_bar("top-import", fraction, overlay);
         }
         if (show_note) {
-            const float fraction = app.note_progress;
+            const float fraction = std::clamp(app.note_progress, 0.f, 1.f);
             char overlay[64];
-            std::snprintf(
-                overlay, sizeof overlay, "%s  %.0f%%", tr(kTranscribe, app.language),
-                std::clamp(fraction, 0.f, 1.f) * 100.f);
-            place_bar("notes", fraction, overlay);
-        }
-        if (show_mask) {
-            const float fraction = app.player->pitch_mask_progress();
-            char overlay[64];
-            std::snprintf(
-                overlay, sizeof overlay, "%s  %.0f%%", tr(kPitchMaskBuild, app.language),
-                std::clamp(fraction, 0.f, 1.f) * 100.f);
-            place_bar("pitch-mask", fraction, overlay);
+            std::snprintf(overlay, sizeof overlay, "%s  %.0f%%", t("transcribe"), fraction * 100.f);
+            place_bar("top-notes", fraction, overlay);
         }
     }
-    if (importing && app.session != nullptr) {
-        ImGui::SetCursorPos(ImVec2(limit + pad, (top_h - MediumButton::height()) * 0.5f));
-        if (MediumButton("cancel", Icon::Cancel).tip(tr(kCancel, app.language)).draw()) {
+    if (can_cancel) {
+        ImGui::SetCursorScreenPos(
+            ImVec2(origin.x + row_w - edge - cancel_w, origin.y + (top_h - cancel_h) * 0.5f));
+        if (MediumButton("cancel", Icon::Cancel).tip(t("cancel")).draw()) {
             app.session->cancel();
         }
     }
@@ -2752,10 +2836,12 @@ void draw(App& app) {
             ImGui::BeginDisabled();
         }
         const float strip_w = std::max(1.f, ImGui::GetContentRegionAvail().x - 8.f * scale);
+        float strip_y = mixer_pad;
         for (int slot = 0; slot < visible; ++slot) {
             const int stem = app.mixer_scroll + slot;
-            ImGui::SetCursorPos(ImVec2(8.f * scale, mixer_pad + static_cast<float>(slot) * (row_h + strip_gap)));
+            ImGui::SetCursorPos(ImVec2(8.f * scale, strip_y));
             draw_strip(app, *song, transport, length, ready, stem, strip_w, row_h);
+            strip_y += row_h + strip_gap;
         }
         if (hold) {
             ImGui::EndDisabled();
@@ -2778,32 +2864,32 @@ void draw(App& app) {
     const float row_y = ImGui::GetCursorPosY();
     SideRow left(SideRow::Dock::Left);
     left.item(PlayerButton::width(), PlayerButton::height(), [&] {
-        if (PlayerButton("play", transport.playing ? Icon::Pause : Icon::Play).engaged(transport.playing).tip(transport.playing ? tr(kPause, app.language) : tr(kPlay, app.language)).draw()) {
+        if (PlayerButton("play", transport.playing ? Icon::Pause : Icon::Play).engaged(transport.playing).tip(transport.playing ? t("pause") : t("play")).draw()) {
             start_or_pause(app, transport);
         }
     });
     left.item(PlayerButton::width(), PlayerButton::height(), [&] {
-        if (PlayerButton("count", Icon::Count).engaged(app.count_in).tip(tr(kCountIn, app.language)).draw()) {
+        if (PlayerButton("count", Icon::Count).engaged(app.count_in).tip(t("count_in")).draw()) {
             app.count_in = !app.count_in;
         }
     });
     left.item(PlayerButton::width(), PlayerButton::height(), [&] {
-        if (PlayerButton("stop", Icon::Stop).tip(tr(kStop, app.language)).draw()) {
+        if (PlayerButton("stop", Icon::Stop).tip(t("stop")).draw()) {
             app.player->stop();
         }
     });
     left.item(PlayerButton::width(), PlayerButton::height(), [&] {
-        if (PlayerButton("loop", Icon::Loop).engaged(transport.loop).tip(transport.loop ? tr(kLoop, app.language) : tr(kLoopOff, app.language)).draw()) {
+        if (PlayerButton("loop", Icon::Loop).engaged(transport.loop).tip(transport.loop ? t("loop") : t("loop_off")).draw()) {
             app.player->set_loop_enabled(!transport.loop);
         }
     });
     left.item(PlayerButton::width(), PlayerButton::height(), [&] {
-        if (PlayerButton("clear", Icon::Clear).tip(tr(kClear, app.language)).draw()) {
+        if (PlayerButton("clear", Icon::Clear).tip(t("clear")).draw()) {
             app.player->clear_loop();
         }
     });
     left.item(PlayerButton::width(), PlayerButton::height(), [&] {
-        if (PlayerButton("snap", Icon::Magnet).engaged(app.loop_snap).tip(tr(kSnap, app.language)).draw()) {
+        if (PlayerButton("snap", Icon::Magnet).engaged(app.loop_snap).tip(t("snap")).draw()) {
             app.loop_snap = !app.loop_snap;
         }
     });
@@ -2813,7 +2899,7 @@ void draw(App& app) {
                 .reset(1.f)
                 .sensitivity(0.012f)
                 .visual_center(1.f)
-                .tip(tr(kSpeed, app.language))
+                .tip(t("speed"))
                 .column(speed_col)
                 .caption([](float value, char* text, std::size_t size) { std::snprintf(text, size, "%.1f x", value); })
                 .draw(app)) {
@@ -2827,9 +2913,9 @@ void draw(App& app) {
     left.item(seek_col, MediumKnob::height(), block_gap, [&] {
         if (MediumKnob("seek-step", &app.seek_step)
                 .range(1.f, 20.f)
-                .reset(5.f)
+                .reset(10.f)
                 .sensitivity(0.12f)
-                .tip(tr(kSeekStep, app.language))
+                .tip(t("seek_step"))
                 .column(seek_col)
                 .caption([](float value, char* text, std::size_t size) {
                     std::snprintf(text, size, "%d s", static_cast<int>(std::lround(value)));
@@ -2844,7 +2930,7 @@ void draw(App& app) {
                 .range(-60.f, 6.f)
                 .reset(0.f)
                 .sensitivity(0.45f)
-                .tip(tr(kMaster, app.language))
+                .tip(t("master"))
                 .column(db_col)
                 .caption(format_db)
                 .draw(app)) {
@@ -2853,7 +2939,7 @@ void draw(App& app) {
     });
     if (!app.device_note.empty()) {
         const ImVec2 note_size = ImGui::CalcTextSize(app.device_note.c_str());
-        left.item(note_size.x, note_size.y, [&] { ImGui::TextDisabled("%s", app.device_note.c_str()); });
+        left.item(note_size.x, note_size.y, [&] { ImGui::TextDisabled("%s", stored(app.device_note)); });
     }
     SideRow right(SideRow::Dock::Right);
     right.margin(10.f * scale);
@@ -2862,7 +2948,7 @@ void draw(App& app) {
                 .range(-60.f, 6.f)
                 .reset(0.f)
                 .sensitivity(0.45f)
-                .tip(tr(kClick, app.language))
+                .tip(t("click"))
                 .column(db_col)
                 .caption(format_db)
                 .draw(app)) {
@@ -2870,13 +2956,13 @@ void draw(App& app) {
         }
     });
     right.item(PlayerButton::width(), PlayerButton::height(), block_gap, [&] {
-        if (PlayerButton("metro", Icon::Metro).engaged(app.metro).tip(tr(kMetronome, app.language)).draw()) {
+        if (PlayerButton("metro", Icon::Metro).engaged(app.metro).tip(t("metronome")).draw()) {
             app.metro = !app.metro;
             push_metronome(app);
         }
     });
     right.item(PlayerButton::width(), PlayerButton::height(), [&] {
-        if (PlayerButton("beat-again", Icon::Again).tip(tr(kBeatAgain, app.language)).draw()) {
+        if (PlayerButton("beat-again", Icon::Again).tip(t("beat_again")).draw()) {
             rerun_beats(app);
         }
     });
