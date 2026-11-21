@@ -25,7 +25,7 @@ public:
     BeatService& operator=(const BeatService&) = delete;
 
     std::uint64_t request(
-        std::uint64_t job, std::filesystem::path cache_file, std::shared_ptr<const bt::SongSnapshot> song, bool refresh = false);
+        std::uint64_t job, std::filesystem::path cache_file, std::shared_ptr<const bt::SongSnapshot> song);
 
     struct Result {
         std::uint64_t job = 0;
@@ -44,7 +44,6 @@ private:
         std::uint64_t ticket = 0;
         std::filesystem::path cache_file;
         std::shared_ptr<const bt::SongSnapshot> song;
-        bool refresh = false;
     };
 
     void thread_main();
@@ -54,6 +53,5 @@ private:
 };
 
 void sync_beats(App& app, const std::shared_ptr<const bt::SongSnapshot>& song);
-void rerun_beats(App& app);
 
 }  // namespace btapp

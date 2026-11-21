@@ -58,6 +58,8 @@ public:
     float stem_progress(int stem) const;
     void clear_stem_progress();
     int running_count() const;
+    // Ask in-flight jobs to exit so a refresh can take the worker slot.
+    void cancel_active();
 
 private:
     struct Request {
@@ -82,5 +84,12 @@ private:
 
 void sync_notes(App& app, const bt::SongSnapshot& song);
 void rerun_notes(App& app, int stem);
+// Writes the stem's current notes beside the transcription cache and bumps the edit count.
+void commit_note_edit(App& app, int stem);
+// One piano-roll gesture. The undo step is recorded when the gesture finishes and the notes changed.
+void begin_note_gesture(App& app, int stem);
+void finish_note_gesture(App& app, int stem);
+// Snaps every note on the stem to the nearest beat, keeping each duration.
+void quantize_stem_notes(App& app, int stem, double length);
 
 }  // namespace btapp

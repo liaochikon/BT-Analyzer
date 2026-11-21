@@ -37,6 +37,8 @@ enum class Icon {
     Again,
     Rerun,
     Magnet,
+    Undo,
+    Redo,
     Count,
 };
 
@@ -373,8 +375,6 @@ private:
 };
 
 void draw(App& app);
-void load_language(App& app);
-void load_output(App& app);
 bool interface_locked(const App& app);
 std::optional<std::filesystem::path> pick_audio(HWND__* hwnd);
 std::vector<char> read_binary(const std::filesystem::path& path);

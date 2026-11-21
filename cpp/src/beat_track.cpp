@@ -192,6 +192,18 @@ bool local_max(const std::vector<double>& values, int index) {
     return values[static_cast<std::size_t>(index)] > previous && values[static_cast<std::size_t>(index)] >= next;
 }
 
+double fold_octave(double interval, double reference) {
+    if (!(interval > 0.0) || !(reference > 0.0)) {
+        return interval;
+    }
+    const double log_ratio = std::log2(interval / reference);
+    const double rounded = std::round(log_ratio);
+    if (std::fabs(rounded) >= 1.0 && std::fabs(log_ratio - rounded) <= 0.26) {
+        return interval / std::pow(2.0, rounded);
+    }
+    return interval;
+}
+
 }  // namespace
 
 std::expected<BeatGrid, std::string> track_beats(
@@ -528,6 +540,227 @@ void extend_beat_edges(BeatGrid& grid, double duration) {
     prefix.insert(prefix.end(), suffix.begin(), suffix.end());
     grid.times = std::move(prefix);
     grid.offset = grid.times.front();
+}
+
+void regularize_beat_grid(BeatGrid& grid, double duration) {
+    if (!(duration > 0.0) && !grid.times.empty()) {
+        duration = grid.times.back();
+    }
+    if (!(duration > 0.0)) {
+        grid.spans.clear();
+        return;
+    }
+
+    const std::vector<double> detected = grid.times;
+    double reference = grid.bpm > 1.f ? 60.0 / static_cast<double>(grid.bpm) : 0.5;
+    if (detected.size() >= 2 && !(grid.bpm > 1.f)) {
+        std::vector<double> gaps;
+        gaps.reserve(detected.size() - 1);
+        for (std::size_t index = 1; index < detected.size(); ++index) {
+            const double gap = detected[index] - detected[index - 1];
+            if (gap > 1e-3) {
+                gaps.push_back(gap);
+            }
+        }
+        if (!gaps.empty()) {
+            reference = median_of(gaps);
+        }
+    }
+
+    struct Section {
+        int begin = 0;
+        int end = 0;
+        double period = 0;
+    };
+    std::vector<Section> sections;
+    const int count = static_cast<int>(detected.size());
+    constexpr int kWindow = 8;
+    constexpr int kHold = 4;
+    constexpr int kMinBeats = 8;
+    if (count < kWindow + kMinBeats) {
+        sections.push_back({0, count, reference});
+    } else {
+        std::vector<double> gaps(static_cast<std::size_t>(count - 1), reference);
+        for (int index = 0; index < count - 1; ++index) {
+            const double gap = detected[static_cast<std::size_t>(index + 1)] - detected[static_cast<std::size_t>(index)];
+            if (gap > 1e-3) {
+                gaps[static_cast<std::size_t>(index)] = fold_octave(gap, reference);
+            }
+        }
+        std::vector<double> local;
+        local.reserve(static_cast<std::size_t>(count - kWindow));
+        for (int index = 0; index + kWindow <= count - 1; ++index) {
+            std::vector<double> sample(gaps.begin() + index, gaps.begin() + index + kWindow);
+            local.push_back(median_of(sample));
+        }
+        int section_start = 0;
+        double section_period = local.empty() ? reference : local.front();
+        int streak = 0;
+        int streak_at = 0;
+        for (int index = 0; index < static_cast<int>(local.size()); ++index) {
+            const double period = std::max(1e-3, section_period);
+            const double ratio = local[static_cast<std::size_t>(index)] / period;
+            if (ratio > 1.06 || ratio < 1.0 / 1.06) {
+                if (streak == 0) {
+                    streak_at = index;
+                }
+                ++streak;
+                const int boundary = streak_at + kWindow / 2;
+                if (streak >= kHold && boundary - section_start >= kMinBeats && count - boundary >= kMinBeats &&
+                    boundary < static_cast<int>(local.size())) {
+                    sections.push_back({section_start, boundary, section_period});
+                    section_start = boundary;
+                    section_period = local[static_cast<std::size_t>(boundary)];
+                    streak = 0;
+                    index = boundary - 1;
+                }
+            } else {
+                streak = 0;
+            }
+        }
+        sections.push_back({section_start, count, section_period > 1e-3 ? section_period : reference});
+    }
+
+    std::vector<double> latticed;
+    std::vector<BeatSpan> spans;
+    latticed.reserve(static_cast<std::size_t>(duration / std::max(0.2, reference)) + 8);
+    for (std::size_t index = 0; index < sections.size(); ++index) {
+        const Section& section = sections[index];
+        const double start = index == 0 ? 0.0 : detected[static_cast<std::size_t>(section.begin)];
+        const double end = index + 1 == sections.size() ? duration : detected[static_cast<std::size_t>(sections[index + 1].begin)];
+        if (!(end > start)) {
+            continue;
+        }
+        std::vector<double> beats;
+        for (int beat = section.begin; beat < section.end; ++beat) {
+            beats.push_back(detected[static_cast<std::size_t>(beat)]);
+        }
+        double period = section.period > 1e-3 ? section.period : reference;
+        period = std::clamp(period, 60.0 / 360.0, 60.0 / 30.0);
+        if (beats.size() >= 2) {
+            std::vector<double> sample;
+            sample.reserve(beats.size());
+            for (std::size_t beat = 1; beat < beats.size(); ++beat) {
+                const double gap = beats[beat] - beats[beat - 1];
+                if (gap > 1e-3) {
+                    sample.push_back(fold_octave(gap, reference));
+                }
+            }
+            if (!sample.empty()) {
+                period = std::clamp(median_of(sample), 60.0 / 360.0, 60.0 / 30.0);
+            }
+        }
+        double origin = beats.empty() ? std::fmod(std::max(0.0, grid.offset), period) : beats.front();
+        double fitted = period;
+        if (beats.size() >= 2) {
+            std::vector<double> ordered = beats;
+            std::sort(ordered.begin(), ordered.end());
+            auto fit_points = [&](double guess) {
+                struct Point {
+                    double index = 0;
+                    double time = 0;
+                };
+                std::vector<Point> points;
+                points.push_back({0, ordered.front()});
+                double beat_index = 0;
+                double previous = ordered.front();
+                for (std::size_t beat = 1; beat < ordered.size(); ++beat) {
+                    const double gap = ordered[beat] - previous;
+                    if (gap < guess * 0.6) {
+                        continue;
+                    }
+                    beat_index += std::max(1.0, std::round(gap / guess));
+                    previous = ordered[beat];
+                    points.push_back({beat_index, ordered[beat]});
+                }
+                if (points.size() < 2) {
+                    return false;
+                }
+                double sum_index = 0;
+                double sum_time = 0;
+                double sum_index_sq = 0;
+                double sum_product = 0;
+                for (const Point& point : points) {
+                    sum_index += point.index;
+                    sum_time += point.time;
+                    sum_index_sq += point.index * point.index;
+                    sum_product += point.index * point.time;
+                }
+                const double weight = static_cast<double>(points.size());
+                const double denom = weight * sum_index_sq - sum_index * sum_index;
+                if (!(std::fabs(denom) > 1e-6)) {
+                    return false;
+                }
+                const double slope = (weight * sum_product - sum_index * sum_time) / denom;
+                const double intercept = (sum_time - slope * sum_index) / weight;
+                if (!(slope > guess * 0.85 && slope < guess * 1.15)) {
+                    return false;
+                }
+                fitted = slope;
+                origin = intercept;
+                return true;
+            };
+            if (fit_points(period)) {
+                fit_points(fitted);
+            }
+        }
+        BeatSpan span;
+        span.start = start;
+        span.end = end;
+        span.bpm = static_cast<float>(60.0 / fitted);
+        const double limit = index + 1 == sections.size() ? duration + 1e-3 : end;
+        long long step = static_cast<long long>(std::ceil((start - origin) / fitted - 1e-9));
+        bool placed = false;
+        for (int guard = 0; guard < 100000; ++guard, ++step) {
+            const double time = origin + static_cast<double>(step) * fitted;
+            if (time >= limit - 1e-6 || time > duration + 1e-4) {
+                break;
+            }
+            if (time < -1e-4) {
+                continue;
+            }
+            if (!latticed.empty() && time <= latticed.back() + 1e-4) {
+                continue;
+            }
+            if (!placed) {
+                span.offset = time;
+                placed = true;
+            }
+            latticed.push_back(time);
+        }
+        if (!placed) {
+            span.offset = start;
+        }
+        spans.push_back(span);
+    }
+
+    if (spans.empty()) {
+        BeatSpan span;
+        span.end = duration;
+        span.bpm = grid.bpm > 1.f ? grid.bpm : 120.f;
+        const double period = 60.0 / static_cast<double>(span.bpm);
+        double cursor = std::fmod(std::max(0.0, grid.offset), period);
+        if (cursor < 1e-6) {
+            cursor = 0;
+        }
+        span.offset = cursor;
+        for (int guard = 0; guard < 100000 && cursor <= duration + 1e-4; ++guard) {
+            latticed.push_back(std::min(cursor, duration));
+            cursor += period;
+        }
+        spans.push_back(span);
+    }
+
+    grid.times = std::move(latticed);
+    grid.spans = std::move(spans);
+    const BeatSpan* primary = &grid.spans.front();
+    for (const BeatSpan& span : grid.spans) {
+        if (span.end - span.start > primary->end - primary->start) {
+            primary = &span;
+        }
+    }
+    grid.bpm = primary->bpm;
+    grid.offset = grid.times.empty() ? primary->offset : grid.times.front();
 }
 
 std::expected<BeatGrid, std::string> load_beats(const std::filesystem::path& path) {

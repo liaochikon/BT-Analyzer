@@ -2,6 +2,9 @@
 
 #include "i18n.hpp"
 #include "icons.hpp"
+#include "history.hpp"
+#include "playback.hpp"
+#include "prefs.hpp"
 
 #include "bt/basic_pitch.hpp"
 #include "bt/project.hpp"
@@ -489,6 +492,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
         render_frame(&host);
     }
 
+    btapp::flush_project_playback(app);
+    // Undo steps end with the app. Held folders from separation reruns are removed here.
+    btapp::reset_project_timeline(app);
     btapp::unload_icon_atlas();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

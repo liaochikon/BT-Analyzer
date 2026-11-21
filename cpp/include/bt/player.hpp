@@ -86,9 +86,12 @@ public:
     void set_loop_a(double seconds);
     void set_loop_b(double seconds);
     void clear_loop();
+    // Stores the marks as given. Negative marks are unset and are not pulled onto the song length.
+    void restore_loop(bool enabled, double a, double b);
+    // division: 0 bar, 1 beat, 2 half, 3 triplet, 4 quarter of a beat.
     void set_metronome(
         bool enabled, float bpm, float click_db, double beat_offset, bool follow_beats = false,
-        std::shared_ptr<const std::vector<double>> beats = {});
+        std::shared_ptr<const std::vector<double>> beats = {}, int division = 1);
 
     Snapshot snapshot() const;
     // Synchronous path for tests. Do not call it while the device thread is running.
@@ -118,7 +121,8 @@ private:
     void reset_midi_synth();
     int read_source(int start, int frames, float* interleaved);
     int synthesize(float* interleaved, int frames);
-    void arm_click(bool downbeat);
+    enum class Click { Sub, Beat, Down };
+    void arm_click(Click kind);
     void accept_count_in();
     int render_count_in(float* interleaved, int frames);
     void render_click(float* interleaved, int frames);

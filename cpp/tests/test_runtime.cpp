@@ -3,6 +3,7 @@
 #include "ui.hpp"
 
 #include "bt/audio.hpp"
+#include "bt/basic_pitch.hpp"
 #include "bt/beat_track.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -396,18 +397,27 @@ TEST_CASE("runtime rerun preempts the single transcription slot") {
         const auto ready = require_settled(*session, session->open_song(song_path));
         REQUIRE(ready->phase == bt::SongPhase::Ready);
         const int mark = hold.started.load();
-        pump(app);
-        hold.wait_until([&] { return hold.started.load() > mark && hold.active.load() > 0; });
+        // Drums skip BP and finish without the hold; keep pumping until a real job is active.
+        const auto first_job = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!(hold.started.load() > mark && hold.active.load() > 0)) {
+            REQUIRE(std::chrono::steady_clock::now() < first_job);
+            pump(app);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
         REQUIRE(running_stems(app) == 1);
         REQUIRE_FALSE(btapp::interface_locked(app));
 
         const int stem = 1 + (pass % 5);
-        const float onset = 0.21f + 0.03f * static_cast<float>(pass);
-        app.pitch_applied[static_cast<std::size_t>(stem)].onset = onset;
+        REQUIRE_FALSE(bt::stem_skips_pitch(stem));
         const int queued = hold.started.load();
         btapp::rerun_notes(app, stem);
         pump(app);
-        hold.wait_until([&] { return hold.started.load() > queued && hold.active.load() > 0; });
+        const auto preempt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!(hold.started.load() > queued && hold.active.load() > 0)) {
+            REQUIRE(std::chrono::steady_clock::now() < preempt);
+            pump(app);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
         const auto settle = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (running_stems(app) != 1 || app.note_status[static_cast<std::size_t>(stem)] != btapp::NoteStatus::Running) {
             REQUIRE(std::chrono::steady_clock::now() < settle);
@@ -426,7 +436,8 @@ TEST_CASE("runtime rerun preempts the single transcription slot") {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         REQUIRE_FALSE(btapp::interface_locked(app));
-        const int pitch = static_cast<int>(std::lround(onset * 100.f));
+        const int pitch =
+            static_cast<int>(std::lround(bt::pitch_parameters_for_stem(stem).onset_threshold * 100.f));
         REQUIRE(app.notes[static_cast<std::size_t>(stem)].size() == 1);
         REQUIRE(app.notes[static_cast<std::size_t>(stem)][0].pitch == pitch);
         const auto cache = ready->cache_directory / (std::string(bt::kStemNames[static_cast<std::size_t>(stem)]) + ".notes");

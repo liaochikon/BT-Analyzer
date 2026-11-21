@@ -78,12 +78,12 @@ BeatService::~BeatService() {
 }
 
 std::uint64_t BeatService::request(
-    std::uint64_t job, std::filesystem::path cache_file, std::shared_ptr<const bt::SongSnapshot> song, bool refresh) {
+    std::uint64_t job, std::filesystem::path cache_file, std::shared_ptr<const bt::SongSnapshot> song) {
     std::uint64_t ticket = 0;
     {
         std::lock_guard lock(state_->mutex);
         ticket = ++state_->ticket;
-        state_->request = Request{job, ticket, std::move(cache_file), std::move(song), refresh};
+        state_->request = Request{job, ticket, std::move(cache_file), std::move(song)};
         state_->has_request = true;
     }
     state_->cv.notify_all();
@@ -131,9 +131,9 @@ void BeatService::thread_main() {
             finish(Result{request.job, ticket, true, {}, {}});
             continue;
         }
-        if (!request.refresh && std::filesystem::exists(request.cache_file)) {
+        if (std::filesystem::exists(request.cache_file)) {
             if (auto loaded = bt::load_beats(request.cache_file)) {
-                bt::extend_beat_edges(*loaded, song_seconds(request.song));
+                bt::regularize_beat_grid(*loaded, song_seconds(request.song));
                 finish(Result{request.job, ticket, false, {}, *loaded});
                 continue;
             }
@@ -178,7 +178,7 @@ void BeatService::thread_main() {
             finish(Result{request.job, ticket, false, stored.error(), {}});
             continue;
         }
-        bt::extend_beat_edges(*grid, song_seconds(request.song));
+        bt::regularize_beat_grid(*grid, song_seconds(request.song));
         finish(Result{request.job, ticket, false, {}, *grid});
     }
 }
@@ -194,8 +194,8 @@ void sync_beats(App& app, const std::shared_ptr<const bt::SongSnapshot>& song) {
         app.bpm = 120.f;
         app.beat_ready = false;
         app.beat_pending = false;
-        app.beat_refresh = false;
         app.beat_times.reset();
+        app.beat_spans.clear();
         app.beat_detail.clear();
     }
     if (app.beat_service != nullptr) {
@@ -226,6 +226,7 @@ void sync_beats(App& app, const std::shared_ptr<const bt::SongSnapshot>& song) {
             } else {
                 app.beat_times.reset();
             }
+            app.beat_spans = result.grid.spans;
             app.bpm = std::clamp(result.grid.bpm, 40.f, 240.f);
             app.beat_offset = std::max(0.0, result.grid.offset);
         }
@@ -233,21 +234,13 @@ void sync_beats(App& app, const std::shared_ptr<const bt::SongSnapshot>& song) {
     if (app.beat_service == nullptr || song->phase != bt::SongPhase::Ready || song->cache_directory.empty()) {
         return;
     }
-    if (app.beat_ready && !app.beat_refresh) {
+    if (app.beat_ready) {
         return;
     }
-    const bool refresh = app.beat_refresh;
-    app.beat_refresh = false;
     app.beat_pending = true;
-    app.beat_ticket = app.beat_service->request(song->job, song->cache_directory / "beats.txt", song, refresh);
+    app.beat_ticket = app.beat_service->request(song->job, song->cache_directory / "beats.txt", song);
     app.beat_ready = true;
     log_phrase(LogLevel::Info, "log.beat_start");
-}
-
-void rerun_beats(App& app) {
-    app.beat_ready = false;
-    app.beat_refresh = true;
-    app.beat_pending = false;
 }
 
 }  // namespace btapp

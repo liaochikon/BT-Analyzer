@@ -197,11 +197,13 @@ struct Player::State {
     std::atomic<float> bpm{120.f};
     std::atomic<float> click_db{0.f};
     std::atomic<double> beat_offset{0};
+    std::atomic<int> division{1};
     std::mutex beat_mu;
     bool follow_beats = false;
     std::shared_ptr<const std::vector<double>> beat_times;
     double metro_song = 0;
     int click_left = 0;
+    int click_total = 0;
     float click_phase = 0.f;
     float click_freq = 1175.f;
     float click_amp = 0.f;
@@ -747,24 +749,49 @@ void Player::clear_loop() {
     state_->loop_b.store(-1);
 }
 
+void Player::restore_loop(bool enabled, double a, double b) {
+    if (!(a >= 0.0) || !std::isfinite(a)) {
+        a = -1;
+    }
+    if (!(b >= 0.0) || !std::isfinite(b)) {
+        b = -1;
+    }
+    state_->loop_a.store(a);
+    state_->loop_b.store(b);
+    state_->loop.store(enabled && a >= 0.0 && b > a + 0.01);
+}
+
 void Player::set_metronome(
     bool enabled, float bpm, float click_db, double beat_offset, bool follow_beats,
-    std::shared_ptr<const std::vector<double>> beats) {
+    std::shared_ptr<const std::vector<double>> beats, int division) {
     state_->metro.store(enabled);
     state_->bpm.store(std::clamp(bpm, 40.f, 240.f));
     state_->click_db.store(std::clamp(click_db, -60.f, 6.f));
     state_->beat_offset.store(std::max(0.0, beat_offset));
+    state_->division.store(std::clamp(division, 0, 4));
     std::lock_guard lock(state_->beat_mu);
     state_->follow_beats = follow_beats;
     state_->beat_times = std::move(beats);
 }
 
-void Player::arm_click(bool downbeat) {
+void Player::arm_click(Click kind) {
     const float level = std::pow(10.f, state_->click_db.load() / 20.f);
-    state_->click_amp = std::min(0.35f, level * (downbeat ? 0.2f : 0.12f));
-    state_->click_freq = downbeat ? 1760.f : 1175.f;
+    float gain = 0.06f;
+    float freq = 1175.f;
+    double seconds = 0.022;
+    if (kind == Click::Down) {
+        gain = 0.2f;
+        freq = 1760.f;
+        seconds = 0.045;
+    } else if (kind == Click::Beat) {
+        gain = 0.12f;
+        seconds = 0.045;
+    }
+    state_->click_amp = std::min(0.35f, level * gain);
+    state_->click_freq = freq;
     state_->click_phase = 0.f;
-    state_->click_left = static_cast<int>(0.045 * kSampleRate);
+    state_->click_total = std::max(1, static_cast<int>(seconds * kSampleRate));
+    state_->click_left = state_->click_total;
 }
 
 void Player::accept_count_in() {
@@ -799,7 +826,7 @@ int Player::render_count_in(float* interleaved, int frames) {
                 }
                 return cursor + synthesize(interleaved + cursor * 2, rest);
             }
-            arm_click(state_->count_left == state_->count_total);
+            arm_click(state_->count_left == state_->count_total ? Click::Down : Click::Beat);
             --state_->count_left;
             state_->count_wait = state_->count_gap;
         }
@@ -812,7 +839,7 @@ int Player::render_count_in(float* interleaved, int frames) {
 }
 
 void Player::render_click(float* interleaved, int frames) {
-    const int total = static_cast<int>(0.045 * kSampleRate);
+    const int total = std::max(1, state_->click_total);
     for (int i = 0; i < frames && state_->click_left > 0; ++i) {
         const float elapsed = 1.f - static_cast<float>(state_->click_left) / static_cast<float>(total);
         const float sample = (state_->click_phase < 0.5f ? 1.f : -1.f) * state_->click_amp * std::exp(-elapsed * 6.f);
@@ -847,7 +874,7 @@ void Player::mix_metronome(float* interleaved, int frames, double from, double t
     }
     int cursor = 0;
     const double span = to - from;
-    auto click_at = [&](double time, bool downbeat) {
+    auto click_at = [&](double time, Click kind) {
         if (time < from - 1e-4 || !(time < to - 1e-9)) {
             return;
         }
@@ -857,26 +884,70 @@ void Player::mix_metronome(float* interleaved, int frames, double from, double t
             render_click(interleaved + cursor * 2, at - cursor);
             cursor = at;
         }
-        arm_click(downbeat);
+        arm_click(kind);
     };
+    const int division = std::clamp(state_->division.load(), 0, 4);
+    const int parts = division == 2 ? 2 : division == 3 ? 3 : division == 4 ? 4 : 1;
+    const bool bars_only = division == 0;
     if (follow) {
         if (times) {
             const auto begin = times->begin();
-            auto it = std::lower_bound(begin, times->end(), from - 1e-4);
-            for (; it != times->end() && *it < to - 1e-9; ++it) {
-                click_at(*it, (it - begin) % 4 == 0);
+            auto cursor_it = std::lower_bound(begin, times->end(), from - 1e-4);
+            std::size_t index = static_cast<std::size_t>(cursor_it - begin);
+            if (index > 0) {
+                --index;
+            }
+            for (; index < times->size(); ++index) {
+                const double beat = (*times)[index];
+                if (beat >= to - 1e-9) {
+                    break;
+                }
+                double gap = 0.5;
+                if (index + 1 < times->size() && (*times)[index + 1] - beat > 1e-6) {
+                    gap = (*times)[index + 1] - beat;
+                } else if (index > 0 && beat - (*times)[index - 1] > 1e-6) {
+                    gap = beat - (*times)[index - 1];
+                }
+                const bool down = index % 4 == 0;
+                if (beat >= from - 1e-4) {
+                    if (bars_only) {
+                        if (down) {
+                            click_at(beat, Click::Down);
+                        }
+                    } else {
+                        click_at(beat, down ? Click::Down : Click::Beat);
+                    }
+                }
+                if (!bars_only && parts > 1) {
+                    const double next = index + 1 < times->size() ? (*times)[index + 1] : beat + gap;
+                    for (int part = 1; part < parts; ++part) {
+                        const double tick = beat + gap * static_cast<double>(part) / static_cast<double>(parts);
+                        if (tick >= next - 1e-6) {
+                            break;
+                        }
+                        click_at(tick, Click::Sub);
+                    }
+                }
             }
         }
     } else {
         const double bpm = std::clamp(static_cast<double>(state_->bpm.load()), 40.0, 240.0);
         const double interval = 60.0 / bpm;
         const double offset = state_->beat_offset.load();
-        long long index = static_cast<long long>(std::ceil((from - offset - 1e-4) / interval));
+        const double step = bars_only ? interval * 4.0 : interval / static_cast<double>(parts);
+        long long index = static_cast<long long>(std::ceil((from - offset - 1e-4) / step));
         if (index < 0) {
             index = 0;
         }
-        while (offset + static_cast<double>(index) * interval < to - 1e-9) {
-            click_at(offset + static_cast<double>(index) * interval, index % 4 == 0);
+        while (offset + static_cast<double>(index) * step < to - 1e-9) {
+            const double time = offset + static_cast<double>(index) * step;
+            Click kind = Click::Sub;
+            if (bars_only) {
+                kind = Click::Down;
+            } else if (index % parts == 0) {
+                kind = (index / parts) % 4 == 0 ? Click::Down : Click::Beat;
+            }
+            click_at(time, kind);
             ++index;
             if (index > 1000000) {
                 break;

@@ -210,6 +210,9 @@ configure_file(
 add_executable(bt-app WIN32
   apps/bt_app/main.cpp
   apps/bt_app/ui.cpp
+  apps/bt_app/prefs.cpp
+  apps/bt_app/playback.cpp
+  apps/bt_app/history.cpp
   apps/bt_app/icons.cpp
   apps/bt_app/i18n.cpp
   apps/bt_app/transport.cpp
@@ -246,6 +249,9 @@ if(BT_DEV_TOOLS)
     apps/bt_app/separate.cpp
     apps/bt_app/keys.cpp
     apps/bt_app/ui.cpp
+    apps/bt_app/prefs.cpp
+    apps/bt_app/playback.cpp
+    apps/bt_app/history.cpp
     apps/bt_app/icons.cpp
     apps/bt_app/midi_view.cpp)
   target_include_directories(bt_stem_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/apps/bt_app)

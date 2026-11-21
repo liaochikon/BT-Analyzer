@@ -29,6 +29,8 @@ struct SongSnapshot {
     std::string detail;
     std::filesystem::path source;
     std::filesystem::path cache_directory;
+    // Set when a refresh finished: the folder it replaced, kept beside the project for undo.
+    std::filesystem::path replaced_directory;
     std::string project_hash;
     std::string project_name;
     std::shared_ptr<const Audio> mix;
@@ -71,7 +73,8 @@ public:
     Session& operator=(Session&&) = delete;
     ~Session();
 
-    std::uint64_t open_song(std::filesystem::path source);
+    // refresh skips a finished stem cache, replaces it, and drops saved notes and beats.
+    std::uint64_t open_song(std::filesystem::path source, bool refresh = false);
     std::uint64_t open_cache(std::filesystem::path directory);
     void close_song();
     void relocate_cache(std::filesystem::path directory, std::string name);

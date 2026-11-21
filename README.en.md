@@ -13,12 +13,16 @@ The current version has been rewritten with C++, ONNX Runtime, and Dear ImGui. O
 ## Features
 
 - **AI stem separation**: After import, BS-RoFormer SW splits a song into six stems (drums, bass, other, vocals, guitar, piano). Settings can change the stem model and the inference device (Auto, CPU, CUDA). HTDemucs 6s is available when `models/htdemucs_6s.onnx` is present. Release parts include the separation weights that were found.
-- **Mixer**: Adjust gain, pan, mute, and solo per stem in real time
-- **Practice player**: Variable speed, A-B loop, and count-in
+- **Mixer**: Gain, pan, mute, and solo per stem; verify mix between original and MIDI
+- **Practice player**: Variable speed, A-B loop, count-in; grid and metronome toggles/divisions are independent
+- **Per-project persistence**: Mixer, loop, grid/metro, fret ranges, and related settings save with the project
+- **Undo / redo**: Note edits, mixer changes, and stem re-runs are reversible
 - **Automatic beats**: The metronome can estimate the song’s beat and follow a floating BPM
-- **AI transcription**: Each stem can be turned into notes for learning by ear
-- **Multi-instrument note view**: Guitar, bass, Piano Roll, and piano drop
-- **Guitar / bass fretboard**: Suggested positions, open strings, harmonics, and alternate fingerings on the fretboard
+- **AI transcription**: Per-stem notes, with quantize and re-run transcription
+- **MIDI editing**: Piano-roll select, move, copy/paste, and delete
+- **Multi-instrument note view**: Guitar, bass, Piano Roll, and piano drop; View / MIDI / TAB stages
+- **Guitar / bass fretboard**: Suggested positions, open strings, harmonics, and alternate fingerings
+- **Shortcuts**: Customizable bindings (including key sequences) with per-window hints
 
 ## Quick start
 
@@ -76,8 +80,8 @@ The bottom section is the main player for song playback.
 
 ![player](docs/images/player.png)
 
-On the left are the main transport controls, left to right: play / pause, count-in, stop, A-B loop, clear A-B loop region, snap A-B loop to beats, playback speed, and master volume.  
-On the right is the metronome. When a song is imported, beat times are calculated and the metronome is turned on. Left to right: metronome volume, metronome on/off, and redetect beats.
+On the left are the main transport controls, left to right: play / pause, count-in, stop, A-B loop, clear A-B loop region, snap A-B loop to beats, playback speed, seek step, and master volume.  
+On the right: click level, grid division, metronome division, grid on/off, metronome on/off. Beats are estimated on import; grid lines and metronome subdivisions are independent.
 
 ![player](docs/images/player_focus.png)
 

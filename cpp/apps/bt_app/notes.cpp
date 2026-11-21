@@ -7,6 +7,7 @@
 #include "bt/basic_pitch.hpp"
 #include "bt/contract.hpp"
 #include "bt/note_score.hpp"
+#include "history.hpp"
 
 #include <algorithm>
 #include <array>
@@ -104,6 +105,7 @@ struct NoteService::State {
     std::array<std::atomic<float>, bt::kStemCount> stem_progress{};
     int slot_count = 0;
     std::atomic<int> running{0};
+    std::atomic<std::uint64_t> cancel_epoch{0};
 };
 
 void NoteService::launch_workers(int workers) {
@@ -250,6 +252,11 @@ int NoteService::running_count() const {
     return state_->running.load();
 }
 
+void NoteService::cancel_active() {
+    state_->cancel_epoch.fetch_add(1, std::memory_order_acq_rel);
+    state_->cv.notify_all();
+}
+
 void NoteService::worker_main(int slot) {
     for (;;) {
         Request request;
@@ -269,7 +276,11 @@ void NoteService::worker_main(int slot) {
         if (stem_ok) {
             state_->stem_progress[static_cast<std::size_t>(stem)].store(0.f);
         }
+        const std::uint64_t epoch_at_start = state_->cancel_epoch.load(std::memory_order_acquire);
         auto stop_requested = [&] {
+            if (state_->cancel_epoch.load(std::memory_order_acquire) != epoch_at_start) {
+                return true;
+            }
             std::lock_guard lock(state_->mutex);
             return state_->stop;
         };
@@ -367,11 +378,16 @@ void NoteService::worker_main(int slot) {
                 was_cancelled ? std::string{} : notes.error(), {}, {}});
             continue;
         }
-        // BP proposes; default energy mask (fft2048) subtracts unsupported notes.
-        const auto mono = stem_mono(*request.stems, request.stem);
-        result.notes = bt::mask_notes_by_midi_energy(
-            notes->data(), notes->size(), mono.data(), static_cast<std::int64_t>(mono.size()),
-            bt::kSampleRate, bt::energy_mask_default());
+        if (transcribe_) {
+            // Injected transcribers (tests) already return final notes.
+            result.notes = std::move(*notes);
+        } else {
+            // BP proposes; default energy mask (fft2048) subtracts unsupported notes.
+            const auto mono = stem_mono(*request.stems, request.stem);
+            result.notes = bt::mask_notes_by_midi_energy(
+                notes->data(), notes->size(), mono.data(), static_cast<std::int64_t>(mono.size()),
+                bt::kSampleRate, bt::energy_mask_default());
+        }
         if (stop_requested()) {
             finish(Result{request.job, ticket, request.stem, true, {}, {}, {}});
             continue;
@@ -386,6 +402,10 @@ void NoteService::worker_main(int slot) {
     }
 }
 
+namespace {
+bool same_notes(const std::vector<MidiNote>& left, const std::vector<MidiNote>& right);
+}  // namespace
+
 void sync_notes(App& app, const bt::SongSnapshot& song) {
     if (song.job != app.note_song) {
         app.note_song = song.job;
@@ -394,6 +414,13 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
         }
         app.note_status.fill(NoteStatus::Idle);
         app.note_refresh.fill(false);
+        app.note_edits.fill(0);
+        app.rerun_pending.fill(false);
+        for (auto& before : app.rerun_before) {
+            before.clear();
+        }
+        app.note_gesture = false;
+        app.note_gesture_before.clear();
         for (auto& detail : app.note_detail) {
             detail.clear();
         }
@@ -412,6 +439,10 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
                 continue;
             }
             app.note_refresh[index] = false;
+            const bool rerun = app.rerun_pending[index];
+            std::vector<MidiNote> rerun_before = std::move(app.rerun_before[index]);
+            app.rerun_before[index].clear();
+            app.rerun_pending[index] = false;
             if (result.cancelled) {
                 if (app.note_status[index] == NoteStatus::Running) {
                     app.note_status[index] = NoteStatus::Idle;
@@ -428,6 +459,32 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
             app.notes[index].reserve(result.notes.size());
             for (const bt::Note& note : result.notes) {
                 app.notes[index].push_back(note);
+            }
+            if (!song.cache_directory.empty()) {
+                const auto edit_path =
+                    song.cache_directory / (std::string(bt::kStemNames[index]) + ".notes.edit");
+                if (auto edited = bt::load_notes(edit_path)) {
+                    app.notes[index].clear();
+                    app.notes[index].reserve(edited->size());
+                    for (const bt::Note& note : *edited) {
+                        app.notes[index].push_back(note);
+                    }
+                }
+            }
+            if (app.roll_stem == result.stem) {
+                app.roll_note = -1;
+            }
+            if (app.note_gesture && app.note_gesture_stem == result.stem) {
+                app.note_gesture = false;
+                app.note_gesture_before.clear();
+            }
+            if (rerun && !same_notes(rerun_before, app.notes[index])) {
+                ProjectStep step;
+                step.kind = ProjectStep::Kind::Notes;
+                step.stem = result.stem;
+                step.notes_before = std::move(rerun_before);
+                step.notes_after = app.notes[index];
+                push_project_step(app, std::move(step));
             }
             app.note_status[index] = NoteStatus::Ready;
             app.note_detail[index].clear();
@@ -450,6 +507,8 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
             app.note_status[index] = NoteStatus::Failed;
             app.note_detail[index] = missing;
             app.note_refresh[index] = false;
+            app.rerun_pending[index] = false;
+            app.rerun_before[index].clear();
             log_stem(LogLevel::Error, stem, "log.transcribe_failed", " · " + missing);
         }
         return;
@@ -459,6 +518,27 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
     }
 
     const int capacity = app.note_service->workers();
+    bool pending_refresh = false;
+    for (int stem = 0; stem < bt::kStemCount; ++stem) {
+        const auto index = static_cast<std::size_t>(stem);
+        if (app.note_refresh[index] && app.note_status[index] != NoteStatus::Running) {
+            pending_refresh = true;
+            break;
+        }
+    }
+    if (pending_refresh) {
+        // Refresh wins the slot: drop non-refresh in-flight work so the worker can pick it up.
+        for (int stem = 0; stem < bt::kStemCount; ++stem) {
+            const auto index = static_cast<std::size_t>(stem);
+            if (app.note_status[index] == NoteStatus::Running && !app.note_refresh[index]) {
+                app.note_ticket[index] = 0;
+                app.note_status[index] = NoteStatus::Idle;
+            }
+        }
+        if (app.note_service->running_count() > 0) {
+            app.note_service->cancel_active();
+        }
+    }
     int inflight = 0;
     for (NoteStatus status : app.note_status) {
         if (status == NoteStatus::Running) {
@@ -480,11 +560,133 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
     }
 }
 
+void commit_note_edit(App& app, int stem) {
+    if (stem < 0 || stem >= bt::kStemCount || app.session == nullptr) {
+        return;
+    }
+    const auto index = static_cast<std::size_t>(stem);
+    ++app.note_edits[index];
+    const auto song = app.session->snapshot();
+    if (song == nullptr || song->cache_directory.empty()) {
+        return;
+    }
+    const auto path = song->cache_directory / (std::string(bt::kStemNames[index]) + ".notes.edit");
+    const auto stored = bt::save_notes(path, app.notes[index]);
+    if (!stored) {
+        return;
+    }
+}
+
+namespace {
+
+bool same_notes(const std::vector<MidiNote>& left, const std::vector<MidiNote>& right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        const MidiNote& a = left[index];
+        const MidiNote& b = right[index];
+        if (a.pitch != b.pitch || a.velocity != b.velocity) {
+            return false;
+        }
+        if (std::fabs(a.start - b.start) > 1e-4 || std::fabs(a.end - b.end) > 1e-4) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+void begin_note_gesture(App& app, int stem) {
+    if (stem < 0 || stem >= bt::kStemCount) {
+        return;
+    }
+    app.note_gesture = true;
+    app.note_gesture_stem = stem;
+    app.note_gesture_before = app.notes[static_cast<std::size_t>(stem)];
+}
+
+void finish_note_gesture(App& app, int stem) {
+    if (!app.note_gesture || stem != app.note_gesture_stem || stem < 0 || stem >= bt::kStemCount) {
+        app.note_gesture = false;
+        app.note_gesture_before.clear();
+        return;
+    }
+    app.note_gesture = false;
+    const auto index = static_cast<std::size_t>(stem);
+    if (same_notes(app.note_gesture_before, app.notes[index])) {
+        app.note_gesture_before.clear();
+        return;
+    }
+    ProjectStep step;
+    step.kind = ProjectStep::Kind::Notes;
+    step.stem = stem;
+    step.notes_before = std::move(app.note_gesture_before);
+    step.notes_after = app.notes[index];
+    app.note_gesture_before.clear();
+    push_project_step(app, std::move(step));
+    commit_note_edit(app, stem);
+}
+
+namespace {
+
+double nearest_time(double time, const std::vector<double>& grid) {
+    double best = grid.front();
+    double best_distance = std::abs(time - best);
+    for (double mark : grid) {
+        const double distance = std::abs(time - mark);
+        if (distance < best_distance) {
+            best = mark;
+            best_distance = distance;
+        }
+    }
+    return best;
+}
+
+}  // namespace
+
+void quantize_stem_notes(App& app, int stem, double length) {
+    if (stem < 0 || stem >= bt::kStemCount) {
+        return;
+    }
+    auto& notes = app.notes[static_cast<std::size_t>(stem)];
+    if (notes.empty()) {
+        return;
+    }
+    double cover = std::max(0.0, length);
+    for (const bt::Note& note : notes) {
+        cover = std::max(cover, note.start);
+    }
+    std::vector<double> grid;
+    auto collect = [&](double tick, GridMark) { grid.push_back(tick); };
+    if (app.beat_times != nullptr && !app.beat_times->empty()) {
+        each_grid_tick(*app.beat_times, app.grid_division, 0.0, cover + 8.0, collect);
+    } else {
+        each_bpm_tick(app.bpm, app.beat_offset, app.grid_division, 0.0, cover + 8.0, collect);
+    }
+    if (grid.empty()) {
+        grid.push_back(0.0);
+    }
+    begin_note_gesture(app, stem);
+    for (bt::Note& note : notes) {
+        const double duration = std::max(0.01, note.end - note.start);
+        note.start = std::max(0.0, nearest_time(note.start, grid));
+        note.end = note.start + duration;
+    }
+    finish_note_gesture(app, stem);
+}
+
 void rerun_notes(App& app, int stem) {
     if (stem < 0 || stem >= bt::kStemCount) {
         return;
     }
     const auto index = static_cast<std::size_t>(stem);
+    if (!app.rerun_pending[index]) {
+        // Keep the notes as they were before the first rerun, so one undo returns to them.
+        app.rerun_before[index] = app.notes[index];
+        app.rerun_pending[index] = true;
+    }
     app.note_refresh[index] = true;
     app.note_ticket[index] = 0;
     app.note_status[index] = NoteStatus::Idle;

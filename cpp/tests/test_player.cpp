@@ -239,6 +239,20 @@ TEST_CASE("metronome clicks on song beats without following master or speed") {
     REQUIRE(energy(22050) < 0.005f);
     REQUIRE(energy(33075 + 80) > 0.02f);
 
+    player.set_metronome(true, 120.f, 0.f, 0.0, false, {}, 2);
+    player.seek(0);
+    REQUIRE(player.render(output.data(), 44100) == 44100);
+    REQUIRE(energy(80) > 0.02f);
+    REQUIRE(energy(6000) < 0.005f);
+    REQUIRE(energy(11025 + 80) > 0.02f);
+    REQUIRE(energy(22050 + 80) > 0.02f);
+
+    player.set_metronome(true, 120.f, 0.f, 0.0, false, {}, 0);
+    player.seek(0);
+    REQUIRE(player.render(output.data(), 44100) == 44100);
+    REQUIRE(energy(80) > 0.02f);
+    REQUIRE(energy(22050 + 80) < 0.005f);
+
     player.set_metronome(true, 120.f, 0.f, 0.0);
     player.set_speed(2.f);
     player.seek(0);

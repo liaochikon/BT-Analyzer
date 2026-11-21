@@ -144,6 +144,7 @@ struct Session::Command {
     int stem = 0;
     float gain = 1.f;
     bool flag = false;
+    bool refresh = false;
 };
 
 struct Session::State {
@@ -165,6 +166,7 @@ struct Session::State {
     std::uint64_t job = 0;
     std::filesystem::path source;
     std::filesystem::path cache_directory;
+    std::filesystem::path replaced_directory;
     std::string project_hash;
     std::string project_name;
     std::shared_ptr<const Audio> mix;
@@ -228,10 +230,10 @@ std::uint64_t Session::issue_revision() {
     return state_->next_revision.fetch_add(1) + 1;
 }
 
-std::uint64_t Session::open_song(std::filesystem::path source) {
+std::uint64_t Session::open_song(std::filesystem::path source, bool refresh) {
     const auto job = state_->next_job.fetch_add(1) + 1;
     state_->live_job.store(job);
-    enqueue(Command{.kind = Command::Kind::Open, .job = job, .path = std::move(source)});
+    enqueue(Command{.kind = Command::Kind::Open, .job = job, .path = std::move(source), .refresh = refresh});
     return job;
 }
 
@@ -328,6 +330,7 @@ std::shared_ptr<SongSnapshot> Session::blank(
     next->detail = std::move(detail);
     next->source = state_->source;
     next->cache_directory = state_->cache_directory;
+    next->replaced_directory = state_->replaced_directory;
     next->project_hash = state_->project_hash;
     next->project_name = state_->project_name;
     next->gain = state_->gain;
@@ -533,6 +536,7 @@ void Session::run_open(const Command& command) {
     state_->job = command.job;
     state_->source = command.path;
     state_->cache_directory.clear();
+    state_->replaced_directory.clear();
     state_->project_hash.clear();
     state_->project_name.clear();
     state_->mix.reset();
@@ -576,7 +580,7 @@ void Session::run_open(const Command& command) {
         publish(blank(SongPhase::Failed, 0.f, false, cached.error()));
         return;
     }
-    if (*cached) {
+    if (*cached && !command.refresh) {
         if (state_->live_job.load() != command.job) {
             abandon();
             return;
@@ -629,9 +633,57 @@ void Session::run_open(const Command& command) {
         return;
     }
 
+    // Move the old project aside so a failed write can put it back. store_cache
+    // leaves an existing directory untouched, so the slot has to be empty first.
+    std::filesystem::path displaced;
+    auto restore_displaced = [&] {
+        if (displaced.empty()) {
+            return true;
+        }
+        std::error_code restore_error;
+        std::filesystem::rename(displaced, state_->cache_directory, restore_error);
+        if (restore_error) {
+            return false;
+        }
+        displaced.clear();
+        return true;
+    };
+    if (command.refresh && !state_->cache_directory.empty()) {
+        std::error_code exists_error;
+        if (std::filesystem::exists(state_->cache_directory, exists_error) && !exists_error) {
+            displaced = state_->cache_directory;
+            displaced += L".replacing";
+            std::error_code move_error;
+            std::filesystem::remove_all(displaced, move_error);
+            std::filesystem::rename(state_->cache_directory, displaced, move_error);
+            if (move_error) {
+                publish(blank(SongPhase::Failed, 1.f, false, "cannot replace cache"));
+                return;
+            }
+        }
+    }
     if (auto stored = store_cache(state_->cache_directory, *separated); !stored) {
+        if (!restore_displaced()) {
+            publish(blank(SongPhase::Failed, 1.f, false, "cannot replace cache"));
+            return;
+        }
         publish(blank(SongPhase::Failed, 1.f, false, stored.error()));
         return;
+    }
+    if (!displaced.empty()) {
+        copy_project_playback(displaced, state_->cache_directory);
+        // Keep the replaced folder beside the model folder under a name no project listing matches.
+        // Renaming the project later does not touch this path, so an undo can swap it back.
+        const auto held = state_->cache_directory.parent_path() / (L".held-" + std::to_wstring(command.job));
+        std::error_code held_error;
+        std::filesystem::remove_all(held, held_error);
+        std::filesystem::rename(displaced, held, held_error);
+        if (held_error) {
+            std::error_code remove_error;
+            std::filesystem::remove_all(displaced, remove_error);
+        } else {
+            state_->replaced_directory = held;
+        }
     }
     located->model_key = model_key;
     if (!device.empty()) {
@@ -651,6 +703,7 @@ void Session::run_open_cache(const Command& command) {
     state_->job = command.job;
     state_->source.clear();
     state_->cache_directory = command.path;
+    state_->replaced_directory.clear();
     state_->project_hash.clear();
     state_->project_name.clear();
     state_->mix.reset();

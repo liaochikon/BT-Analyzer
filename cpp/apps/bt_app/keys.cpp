@@ -1,8 +1,13 @@
 #include "keys.hpp"
 
 #include "i18n.hpp"
+#include "history.hpp"
+#include "playback.hpp"
+#include "prefs.hpp"
 
 #include "app_state.hpp"
+#include "midi_view.hpp"
+#include "notes.hpp"
 #include "transport.hpp"
 
 #include "imgui.h"
@@ -12,7 +17,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -25,6 +33,10 @@
 
 namespace btapp {
 namespace {
+
+constexpr double kSequenceTimeout = 0.75;
+constexpr int kActionCount = static_cast<int>(Action::Count);
+constexpr int kLayoutVersion = 4;
 
 bool ime_owns_keyboard(const App& app) {
     if (ImGui::GetIO().WantTextInput) {
@@ -43,10 +55,12 @@ bool ime_owns_keyboard(const App& app) {
     return composing > 0;
 }
 
-constexpr int kActionCount = static_cast<int>(Action::Count);
-
 const char* action_id(Action action) {
     switch (action) {
+    case Action::Undo:
+        return "undo";
+    case Action::Redo:
+        return "redo";
     case Action::PlayPause:
         return "play";
     case Action::Stop:
@@ -61,6 +75,8 @@ const char* action_id(Action action) {
         return "clear_loop";
     case Action::Metro:
         return "metro";
+    case Action::Grid:
+        return "grid";
     case Action::CountIn:
         return "count_in";
     case Action::Snap:
@@ -73,12 +89,6 @@ const char* action_id(Action action) {
         return "prev_track";
     case Action::NextTrack:
         return "next_track";
-    case Action::ViewGuitar:
-        return "view_guitar";
-    case Action::ViewBass:
-        return "view_bass";
-    case Action::ViewFall:
-        return "view_fall";
     case Action::AdjustSpeed:
         return "adjust_speed";
     case Action::AdjustSeek:
@@ -91,6 +101,18 @@ const char* action_id(Action action) {
         return "adjust_track_gain";
     case Action::AdjustTrackPan:
         return "adjust_track_pan";
+    case Action::AdjustDown:
+        return "adjust_down";
+    case Action::AdjustUp:
+        return "adjust_up";
+    case Action::MidiCopy:
+        return "midi_copy";
+    case Action::MidiPaste:
+        return "midi_paste";
+    case Action::MidiDuplicate:
+        return "midi_duplicate";
+    case Action::MidiDelete:
+        return "midi_delete";
     case Action::Count:
         break;
     }
@@ -107,22 +129,30 @@ Action action_from_id(std::string_view id) {
     return Action::Count;
 }
 
-KeyChord chord(int key, bool shift = false, bool ctrl = false, bool alt = false) {
+KeyChord make_chord(int key, bool shift = false, bool ctrl = false, bool alt = false) {
     return KeyChord{ctrl, shift, alt, key};
+}
+
+KeySequence make_sequence(KeyChord chord) {
+    KeySequence sequence{};
+    if (chord.key == 0) {
+        return sequence;
+    }
+    sequence.steps[0] = chord;
+    sequence.length = 1;
+    return sequence;
 }
 
 bool keyboard_key(int key) {
     return key >= ImGuiKey_Tab && key <= ImGuiKey_Oem102;
 }
 
-// Escape cancels capture and Backspace clears the binding, so they are not bindable.
 bool bindable_key(int key) {
     if (!keyboard_key(key)) {
         return false;
     }
     switch (key) {
     case ImGuiKey_Escape:
-    case ImGuiKey_Backspace:
     case ImGuiKey_LeftCtrl:
     case ImGuiKey_RightCtrl:
     case ImGuiKey_LeftShift:
@@ -161,30 +191,84 @@ bool same_chord(const KeyChord& left, const KeyChord& right) {
     return left.key == right.key && left.ctrl == right.ctrl && left.shift == right.shift && left.alt == right.alt;
 }
 
-bool adjust_action(Action action) {
-    return action >= Action::AdjustSpeed && action <= Action::AdjustTrackPan;
+bool same_sequence(const KeySequence& left, const KeySequence& right) {
+    if (left.length != right.length) {
+        return false;
+    }
+    for (int index = 0; index < left.length; ++index) {
+        if (!same_chord(left.steps[static_cast<std::size_t>(index)], right.steps[static_cast<std::size_t>(index)])) {
+            return false;
+        }
+    }
+    return true;
 }
 
-// A tap is the single action. Holding that same key and pressing seek is the knob.
-bool knob_and_single(Action left, Action right) {
-    return adjust_action(left) != adjust_action(right);
+bool sequence_is_prefix(const KeySequence& prefix, const KeySequence& full) {
+    if (prefix.empty() || prefix.length >= full.length) {
+        return false;
+    }
+    for (int index = 0; index < prefix.length; ++index) {
+        if (!same_chord(prefix.steps[static_cast<std::size_t>(index)], full.steps[static_cast<std::size_t>(index)])) {
+            return false;
+        }
+    }
+    return true;
 }
 
-int conflict_of(const Keymap& map, Action self, int slot, const KeyChord& chord) {
-    if (chord.key == 0) {
+bool adjust_layer_action(Action action) {
+    switch (action) {
+    case Action::AdjustSpeed:
+    case Action::AdjustSeek:
+    case Action::AdjustMaster:
+    case Action::AdjustClick:
+    case Action::AdjustTrackGain:
+    case Action::AdjustTrackPan:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool direction_pair(Action left, Action right) {
+    return (left == Action::SeekBack && right == Action::AdjustDown) ||
+           (left == Action::AdjustDown && right == Action::SeekBack) ||
+           (left == Action::SeekForward && right == Action::AdjustUp) ||
+           (left == Action::AdjustUp && right == Action::SeekForward);
+}
+
+bool compatible_overlap(Action left, Action right) {
+    if (left == right) {
+        return false;
+    }
+    if (adjust_layer_action(left) != adjust_layer_action(right)) {
+        return true;
+    }
+    return direction_pair(left, right);
+}
+
+int conflict_of(const Keymap& map, Action self, int slot, const KeySequence& sequence) {
+    if (sequence.empty()) {
         return -1;
     }
     for (int index = 0; index < kActionCount; ++index) {
         const auto action = static_cast<Action>(index);
-        const auto at = static_cast<std::size_t>(index);
-        if (knob_and_single(self, action)) {
+        if (compatible_overlap(self, action)) {
             continue;
         }
-        if (same_chord(map.bindings[at], chord) && !(action == self && slot == 0)) {
-            return index;
-        }
-        if (same_chord(map.alternate[at], chord) && !(action == self && slot == 1)) {
-            return index;
+        for (int other_slot = 0; other_slot < 2; ++other_slot) {
+            if (action == self && other_slot == slot) {
+                continue;
+            }
+            const KeySequence& other =
+                other_slot == 0 ? map.bindings[static_cast<std::size_t>(index)]
+                                : map.alternate[static_cast<std::size_t>(index)];
+            if (other.empty()) {
+                continue;
+            }
+            if (same_sequence(sequence, other) || sequence_is_prefix(sequence, other) ||
+                sequence_is_prefix(other, sequence)) {
+                return index;
+            }
         }
     }
     return -1;
@@ -194,155 +278,15 @@ void apply_mute_or_solo(App& app, bool solo) {
     if (app.session == nullptr || app.selected < 0 || app.selected >= bt::kStemCount) {
         return;
     }
-    const auto song = app.session->snapshot();
-    if (song == nullptr) {
-        return;
-    }
     const auto index = static_cast<std::size_t>(app.selected);
     if (solo) {
-        const bool next = !song->solo[index];
-        app.session->set_solo(app.selected, next);
+        app.solo[index] = !app.solo[index];
+        app.session->set_solo(app.selected, app.solo[index]);
     } else {
-        const bool next = !song->mute[index];
-        app.session->set_mute(app.selected, next);
+        app.mute[index] = !app.mute[index];
+        app.session->set_mute(app.selected, app.mute[index]);
     }
-}
-
-}  // namespace
-
-bool reserved_chord(const KeyChord& chord) {
-    if (chord.key == 0) {
-        return false;
-    }
-    // Leave Windows shell / system menu chords alone.
-    if (chord.key == ImGuiKey_LeftSuper || chord.key == ImGuiKey_RightSuper || chord.key == ImGuiKey_Menu ||
-        chord.key == ImGuiKey_F10) {
-        return true;
-    }
-    // Ctrl/Shift/Alt+Space are common IME / layout switch chords.
-    if (chord.key == ImGuiKey_Space && (chord.ctrl || chord.shift || chord.alt)) {
-        return true;
-    }
-    if (chord.alt && (chord.key == ImGuiKey_F4 || chord.key == ImGuiKey_Tab || chord.key == ImGuiKey_Escape ||
-                      chord.key == ImGuiKey_Enter || chord.key == ImGuiKey_F10)) {
-        return true;
-    }
-    if (chord.ctrl && !chord.shift && !chord.alt &&
-        (chord.key == ImGuiKey_Escape || chord.key == ImGuiKey_F4)) {
-        return true;
-    }
-    // Alt alone turns on menu mnemonics; do not let app bindings own Alt+letter.
-    if (chord.alt && !chord.ctrl) {
-        return true;
-    }
-    return false;
-}
-
-const char* action_label(Action action, int language) {
-    const char* key = "";
-    switch (action) {
-    case Action::PlayPause:
-        key = "action.play_pause";
-        break;
-    case Action::Stop:
-        key = "action.stop";
-        break;
-    case Action::SeekBack:
-        key = "action.seek_back";
-        break;
-    case Action::SeekForward:
-        key = "action.seek_forward";
-        break;
-    case Action::Loop:
-        key = "action.loop";
-        break;
-    case Action::ClearLoop:
-        key = "action.clear_loop";
-        break;
-    case Action::Metro:
-        key = "action.metro";
-        break;
-    case Action::CountIn:
-        key = "action.count_in";
-        break;
-    case Action::Snap:
-        key = "action.snap";
-        break;
-    case Action::Mute:
-        key = "action.mute";
-        break;
-    case Action::Solo:
-        key = "action.solo";
-        break;
-    case Action::PrevTrack:
-        key = "action.prev_track";
-        break;
-    case Action::NextTrack:
-        key = "action.next_track";
-        break;
-    case Action::ViewGuitar:
-        key = "action.view_guitar";
-        break;
-    case Action::ViewBass:
-        key = "action.view_bass";
-        break;
-    case Action::ViewFall:
-        key = "action.view_fall";
-        break;
-    case Action::AdjustSpeed:
-        key = "action.adjust_speed";
-        break;
-    case Action::AdjustSeek:
-        key = "action.adjust_seek";
-        break;
-    case Action::AdjustMaster:
-        key = "action.adjust_master";
-        break;
-    case Action::AdjustClick:
-        key = "action.adjust_click";
-        break;
-    case Action::AdjustTrackGain:
-        key = "action.adjust_track_gain";
-        break;
-    case Action::AdjustTrackPan:
-        key = "action.adjust_track_pan";
-        break;
-    case Action::Count:
-        break;
-    }
-    return t(key, language);
-}
-
-Keymap default_keymap() {
-    Keymap map;
-    map.bindings[static_cast<std::size_t>(Action::PlayPause)] = chord(ImGuiKey_Z);
-    map.bindings[static_cast<std::size_t>(Action::Stop)] = chord(ImGuiKey_C);
-    map.bindings[static_cast<std::size_t>(Action::SeekBack)] = chord(ImGuiKey_A);
-    map.bindings[static_cast<std::size_t>(Action::SeekForward)] = chord(ImGuiKey_D);
-    map.bindings[static_cast<std::size_t>(Action::Loop)] = chord(ImGuiKey_V);
-    map.bindings[static_cast<std::size_t>(Action::ClearLoop)] = chord(ImGuiKey_B);
-    map.bindings[static_cast<std::size_t>(Action::Metro)] = chord(ImGuiKey_R);
-    map.bindings[static_cast<std::size_t>(Action::CountIn)] = chord(ImGuiKey_X);
-    map.bindings[static_cast<std::size_t>(Action::Snap)] = chord(ImGuiKey_N);
-    map.bindings[static_cast<std::size_t>(Action::Mute)] = chord(ImGuiKey_Q);
-    map.bindings[static_cast<std::size_t>(Action::Solo)] = chord(ImGuiKey_E);
-    map.bindings[static_cast<std::size_t>(Action::PrevTrack)] = chord(ImGuiKey_W);
-    map.bindings[static_cast<std::size_t>(Action::NextTrack)] = chord(ImGuiKey_S);
-    map.bindings[static_cast<std::size_t>(Action::ViewGuitar)] = chord(ImGuiKey_F1);
-    map.bindings[static_cast<std::size_t>(Action::ViewBass)] = chord(ImGuiKey_F2);
-    map.bindings[static_cast<std::size_t>(Action::ViewFall)] = chord(ImGuiKey_F3);
-    map.bindings[static_cast<std::size_t>(Action::AdjustSpeed)] = chord(ImGuiKey_1);
-    map.bindings[static_cast<std::size_t>(Action::AdjustSeek)] = chord(ImGuiKey_2);
-    map.bindings[static_cast<std::size_t>(Action::AdjustMaster)] = chord(ImGuiKey_3);
-    map.bindings[static_cast<std::size_t>(Action::AdjustClick)] = chord(ImGuiKey_4);
-    map.bindings[static_cast<std::size_t>(Action::AdjustTrackGain)] = chord(ImGuiKey_5);
-    map.bindings[static_cast<std::size_t>(Action::AdjustTrackPan)] = chord(ImGuiKey_6);
-    map.alternate[static_cast<std::size_t>(Action::PlayPause)] = chord(ImGuiKey_Space);
-    map.alternate[static_cast<std::size_t>(Action::SeekBack)] = chord(ImGuiKey_LeftArrow);
-    map.alternate[static_cast<std::size_t>(Action::SeekForward)] = chord(ImGuiKey_RightArrow);
-    map.alternate[static_cast<std::size_t>(Action::PrevTrack)] = chord(ImGuiKey_UpArrow);
-    map.alternate[static_cast<std::size_t>(Action::NextTrack)] = chord(ImGuiKey_DownArrow);
-    return map;
+    touch_project_playback(app);
 }
 
 KeyChord parse_chord(std::string value) {
@@ -369,13 +313,564 @@ KeyChord parse_chord(std::string value) {
     return parsed;
 }
 
+KeySequence parse_sequence(std::string value) {
+    KeySequence sequence{};
+    if (value.empty() || value == "None") {
+        return sequence;
+    }
+    while (!value.empty() && sequence.length < kMaxSequenceSteps) {
+        const auto comma = value.find(',');
+        const std::string step = comma == std::string::npos ? value : value.substr(0, comma);
+        const KeyChord chord = parse_chord(step);
+        if (chord.key == 0) {
+            return {};
+        }
+        sequence.steps[static_cast<std::size_t>(sequence.length++)] = chord;
+        if (comma == std::string::npos) {
+            break;
+        }
+        value.erase(0, comma + 1);
+    }
+    return sequence;
+}
+
 void drop_reserved_alternates(Keymap& map) {
     for (int index = 0; index < kActionCount; ++index) {
-        KeyChord& extra = map.alternate[static_cast<std::size_t>(index)];
-        if (reserved_chord(extra)) {
+        KeySequence& extra = map.alternate[static_cast<std::size_t>(index)];
+        if (!extra.empty() && reserved_chord(extra.steps[0])) {
             extra = {};
         }
     }
+}
+
+bool layer_held(const KeySequence& sequence) {
+    if (sequence.length != 1) {
+        return false;
+    }
+    const KeyChord& chord = sequence.steps[0];
+    if (chord.key == 0 || chord.ctrl || chord.shift || chord.alt || reserved_chord(chord)) {
+        return false;
+    }
+    if (ImGui::IsKeyDown(ImGuiKey_LeftSuper) || ImGui::IsKeyDown(ImGuiKey_RightSuper) || ImGui::IsKeyDown(ImGuiKey_Menu) ||
+        ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift) ||
+        ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl) ||
+        ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)) {
+        return false;
+    }
+    return ImGui::IsKeyDown(static_cast<ImGuiKey>(chord.key));
+}
+
+bool single_chord_pressed(const KeySequence& sequence, bool repeat) {
+    if (sequence.length != 1) {
+        return false;
+    }
+    return chord_pressed(sequence.steps[0], repeat);
+}
+
+float snap_step(float value, float min_value, float max_value, float step) {
+    const float steps = std::round((value - min_value) / step);
+    return std::clamp(min_value + steps * step, min_value, max_value);
+}
+
+void nudge_layer(App& app, Action layer, int direction) {
+    switch (layer) {
+    case Action::AdjustSpeed:
+        app.speed = snap_step(app.speed + 0.1f * static_cast<float>(direction), 0.1f, 2.f, 0.1f);
+        if (app.speed != app.applied_speed) {
+            app.applied_speed = app.speed;
+            app.player->set_speed(app.speed);
+        }
+        touch_project_playback(app);
+        break;
+    case Action::AdjustSeek:
+        app.seek_step = snap_step(app.seek_step + static_cast<float>(direction), 1.f, 20.f, 1.f);
+        save_performance(app);
+        break;
+    case Action::AdjustMaster:
+        app.master_db = snap_step(app.master_db + static_cast<float>(direction), -60.f, 6.f, 1.f);
+        app.player->set_master_db(app.master_db);
+        touch_project_playback(app);
+        break;
+    case Action::AdjustClick:
+        app.click_db = snap_step(app.click_db + static_cast<float>(direction), -60.f, 6.f, 1.f);
+        apply_metronome(app);
+        touch_project_playback(app);
+        break;
+    case Action::AdjustTrackGain:
+        if (app.session != nullptr && app.selected >= 0 && app.selected < bt::kStemCount) {
+            float& db = app.gain_db[static_cast<std::size_t>(app.selected)];
+            db = snap_step(db + static_cast<float>(direction), -60.f, 6.f, 1.f);
+            app.session->set_gain(app.selected, std::pow(10.f, db / 20.f));
+            touch_project_playback(app);
+        }
+        break;
+    case Action::AdjustTrackPan:
+        if (app.session != nullptr && app.selected >= 0 && app.selected < bt::kStemCount) {
+            float& pan = app.pan[static_cast<std::size_t>(app.selected)];
+            pan = snap_step(pan + 0.05f * static_cast<float>(direction), -1.f, 1.f, 0.05f);
+            app.session->set_pan(app.selected, pan);
+            touch_project_playback(app);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+std::string sequence_hint(const Keymap& map, Action action, int slot) {
+    const KeySequence& sequence =
+        slot == 0 ? map.bindings[static_cast<std::size_t>(action)] : map.alternate[static_cast<std::size_t>(action)];
+    if (sequence.empty()) {
+        return {};
+    }
+    if (!adjust_layer_action(action) || sequence.length != 1) {
+        return sequence_text(sequence);
+    }
+    const KeySequence& down =
+        slot == 0 ? map.bindings[static_cast<std::size_t>(Action::AdjustDown)]
+                  : map.alternate[static_cast<std::size_t>(Action::AdjustDown)];
+    const KeySequence& up =
+        slot == 0 ? map.bindings[static_cast<std::size_t>(Action::AdjustUp)]
+                  : map.alternate[static_cast<std::size_t>(Action::AdjustUp)];
+    const KeyChord& back = down.empty() ? map.bindings[static_cast<std::size_t>(Action::SeekBack)].steps[0]
+                                        : down.steps[0];
+    const KeyChord& forward = up.empty() ? map.bindings[static_cast<std::size_t>(Action::SeekForward)].steps[0]
+                                         : up.steps[0];
+    std::string shown = sequence_text(sequence);
+    shown += " + ";
+    shown += key_name(back.key) != nullptr ? key_name(back.key) : "?";
+    shown += "/";
+    shown += key_name(forward.key) != nullptr ? key_name(forward.key) : "?";
+    return shown;
+}
+
+void draw_hint_panel(const ScreenRect& anchor, const std::vector<std::pair<std::string, std::string>>& rows) {
+    if (!anchor.valid() || rows.empty()) {
+        return;
+    }
+    const float scale = ImGui::GetIO().FontGlobalScale > 0.f ? ImGui::GetIO().FontGlobalScale : 1.f;
+    const float pad = 8.f * scale;
+    const float gap = 10.f * scale;
+    const float line_gap = 2.f * scale;
+    const float margin = 8.f * scale;
+    float key_w = 0.f;
+    float action_w = 0.f;
+    float line_h = ImGui::GetTextLineHeight();
+    for (const auto& [key, action] : rows) {
+        key_w = std::max(key_w, ImGui::CalcTextSize(key.c_str()).x);
+        action_w = std::max(action_w, ImGui::CalcTextSize(action.c_str()).x);
+    }
+    const float box_w = pad * 2.f + key_w + gap + action_w;
+    const float box_h = pad * 2.f + static_cast<float>(rows.size()) * line_h +
+                        static_cast<float>(rows.size() - 1) * line_gap;
+    const float x1 = std::min(anchor.x1 - margin, anchor.x0 + std::max(box_w + margin, 1.f));
+    const float y1 = std::min(anchor.y1 - margin, anchor.y0 + std::max(box_h + margin, 1.f));
+    const float x0 = x1 - box_w;
+    const float y0 = y1 - box_h;
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(0, 0, 0, 160), 4.f * scale);
+    float y = y0 + pad;
+    for (const auto& [key, action] : rows) {
+        draw->AddText(ImVec2(x0 + pad, y), IM_COL32(242, 242, 242, 255), key.c_str());
+        draw->AddText(ImVec2(x0 + pad + key_w + gap, y), IM_COL32(242, 242, 242, 255), action.c_str());
+        y += line_h + line_gap;
+    }
+}
+
+void append_action_hints(
+    App& app, std::vector<std::pair<std::string, std::string>>& rows, const Action* order, std::size_t count) {
+    for (std::size_t index = 0; index < count; ++index) {
+        const Action action = order[index];
+        const auto at = static_cast<std::size_t>(action);
+        const char* label = action_label(action, i18n_language());
+        for (int slot = 0; slot < 2; ++slot) {
+            const std::string key = sequence_hint(app.keymap, action, slot);
+            if (key.empty() || key == "None") {
+                continue;
+            }
+            rows.emplace_back(key, label);
+        }
+        (void)at;
+    }
+}
+
+struct SeqRuntime {
+    int depth = 0;
+    std::array<KeyChord, kMaxSequenceSteps> steps{};
+    double deadline = 0;
+};
+
+SeqRuntime& seq_runtime() {
+    static SeqRuntime state;
+    return state;
+}
+
+void clear_seq_runtime() {
+    seq_runtime() = {};
+}
+
+bool matches_armed_prefix(const KeySequence& sequence, const SeqRuntime& armed) {
+    if (armed.depth <= 0 || armed.depth > sequence.length) {
+        return false;
+    }
+    for (int index = 0; index < armed.depth; ++index) {
+        if (!same_chord(sequence.steps[static_cast<std::size_t>(index)], armed.steps[static_cast<std::size_t>(index)])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool poll_chord_edge(KeyChord& out) {
+    return capture_chord(out);
+}
+
+// Returns matched action or Count. Advances / clears sequence state.
+Action match_sequence_edge(const Keymap& map, bool allow_repeat_single) {
+    SeqRuntime& armed = seq_runtime();
+    const double now = ImGui::GetTime();
+    if (armed.depth > 0 && now > armed.deadline) {
+        clear_seq_runtime();
+    }
+
+    KeyChord edge{};
+    if (!poll_chord_edge(edge)) {
+        return Action::Count;
+    }
+    if (reserved_chord(edge)) {
+        clear_seq_runtime();
+        return Action::Count;
+    }
+
+    KeySequence candidate = make_sequence(edge);
+    if (armed.depth > 0 && armed.depth < kMaxSequenceSteps) {
+        candidate.length = armed.depth + 1;
+        for (int index = 0; index < armed.depth; ++index) {
+            candidate.steps[static_cast<std::size_t>(index)] = armed.steps[static_cast<std::size_t>(index)];
+        }
+        candidate.steps[static_cast<std::size_t>(armed.depth)] = edge;
+    }
+
+    bool has_longer = false;
+    Action exact = Action::Count;
+    for (int index = 0; index < kActionCount; ++index) {
+        const auto action = static_cast<Action>(index);
+        for (int slot = 0; slot < 2; ++slot) {
+            const KeySequence& sequence =
+                slot == 0 ? map.bindings[static_cast<std::size_t>(index)]
+                          : map.alternate[static_cast<std::size_t>(index)];
+            if (sequence.empty()) {
+                continue;
+            }
+            if (same_sequence(sequence, candidate)) {
+                exact = action;
+            } else if (sequence_is_prefix(candidate, sequence)) {
+                has_longer = true;
+            }
+        }
+    }
+
+    if (exact != Action::Count && !has_longer) {
+        clear_seq_runtime();
+        (void)allow_repeat_single;
+        return exact;
+    }
+    if (has_longer) {
+        armed.depth = candidate.length;
+        for (int index = 0; index < candidate.length; ++index) {
+            armed.steps[static_cast<std::size_t>(index)] = candidate.steps[static_cast<std::size_t>(index)];
+        }
+        armed.deadline = now + kSequenceTimeout;
+        return Action::Count;
+    }
+    if (exact != Action::Count) {
+        clear_seq_runtime();
+        return exact;
+    }
+    clear_seq_runtime();
+    return Action::Count;
+}
+
+bool action_fired(const Keymap& map, Action action, bool repeat) {
+    // Length-1 with repeat uses ImGui repeat; multi-step never repeats.
+    const KeySequence& primary = map.bindings[static_cast<std::size_t>(action)];
+    const KeySequence& alternate = map.alternate[static_cast<std::size_t>(action)];
+    if (repeat) {
+        return single_chord_pressed(primary, true) || single_chord_pressed(alternate, true);
+    }
+    // Edge matching is done once per frame via match_sequence_edge; callers use that for tap actions.
+    return single_chord_pressed(primary, false) || single_chord_pressed(alternate, false);
+}
+
+void fire_action(App& app, Action action, bool ready, const bt::Player::Snapshot& transport) {
+    switch (action) {
+    case Action::Undo:
+        undo_project(app);
+        break;
+    case Action::Redo:
+        redo_project(app);
+        break;
+    case Action::PlayPause:
+        if (ready) {
+            start_or_pause(app, transport);
+        }
+        break;
+    case Action::Stop:
+        if (ready) {
+            app.player->stop();
+        }
+        break;
+    case Action::SeekBack:
+        if (ready) {
+            const double step = static_cast<double>(std::clamp(app.seek_step, 1.f, 20.f));
+            app.player->seek(transport.position - step * static_cast<double>(transport.speed));
+        }
+        break;
+    case Action::SeekForward:
+        if (ready) {
+            const double step = static_cast<double>(std::clamp(app.seek_step, 1.f, 20.f));
+            app.player->seek(transport.position + step * static_cast<double>(transport.speed));
+        }
+        break;
+    case Action::Loop:
+        if (ready) {
+            app.player->set_loop_enabled(!transport.loop);
+            touch_project_playback(app);
+        }
+        break;
+    case Action::ClearLoop:
+        app.player->clear_loop();
+        touch_project_playback(app);
+        break;
+    case Action::Metro:
+        app.metro = !app.metro;
+        apply_metronome(app);
+        touch_project_playback(app);
+        break;
+    case Action::Grid:
+        app.grid = !app.grid;
+        touch_project_playback(app);
+        break;
+    case Action::CountIn:
+        app.count_in = !app.count_in;
+        touch_project_playback(app);
+        break;
+    case Action::Snap:
+        app.loop_snap = !app.loop_snap;
+        touch_project_playback(app);
+        break;
+    case Action::Mute:
+        if (ready) {
+            apply_mute_or_solo(app, false);
+        }
+        break;
+    case Action::Solo:
+        if (ready) {
+            apply_mute_or_solo(app, true);
+        }
+        break;
+    case Action::PrevTrack:
+        app.selected = (app.selected + bt::kStemCount - 1) % bt::kStemCount;
+        break;
+    case Action::NextTrack:
+        app.selected = (app.selected + 1) % bt::kStemCount;
+        break;
+    case Action::MidiCopy:
+        midi_copy_selection(app);
+        break;
+    case Action::MidiPaste:
+        midi_begin_paste_preview(app);
+        break;
+    case Action::MidiDuplicate:
+        midi_duplicate_selection(app);
+        break;
+    case Action::MidiDelete:
+        midi_delete_selection(app);
+        break;
+    default:
+        break;
+    }
+}
+
+}  // namespace
+
+ActionScope action_scope(Action action) {
+    switch (action) {
+    case Action::Undo:
+    case Action::Redo:
+        return ActionScope::Project;
+    case Action::Mute:
+    case Action::Solo:
+    case Action::PrevTrack:
+    case Action::NextTrack:
+    case Action::AdjustTrackGain:
+    case Action::AdjustTrackPan:
+        return ActionScope::Track;
+    case Action::MidiCopy:
+    case Action::MidiPaste:
+    case Action::MidiDuplicate:
+    case Action::MidiDelete:
+        return ActionScope::Midi;
+    default:
+        return ActionScope::Player;
+    }
+}
+
+bool reserved_chord(const KeyChord& chord) {
+    if (chord.key == 0) {
+        return false;
+    }
+    if (chord.key == ImGuiKey_LeftSuper || chord.key == ImGuiKey_RightSuper || chord.key == ImGuiKey_Menu ||
+        chord.key == ImGuiKey_F10) {
+        return true;
+    }
+    if (chord.key == ImGuiKey_Space && (chord.ctrl || chord.shift || chord.alt)) {
+        return true;
+    }
+    if (chord.alt && (chord.key == ImGuiKey_F4 || chord.key == ImGuiKey_Tab || chord.key == ImGuiKey_Escape ||
+                      chord.key == ImGuiKey_Enter || chord.key == ImGuiKey_F10)) {
+        return true;
+    }
+    if (chord.ctrl && !chord.shift && !chord.alt &&
+        (chord.key == ImGuiKey_Escape || chord.key == ImGuiKey_F4)) {
+        return true;
+    }
+    if (chord.alt && !chord.ctrl) {
+        return true;
+    }
+    return false;
+}
+
+const char* action_label(Action action, int language) {
+    const char* key = "";
+    switch (action) {
+    case Action::Undo:
+        key = "undo";
+        break;
+    case Action::Redo:
+        key = "redo";
+        break;
+    case Action::PlayPause:
+        key = "action.play_pause";
+        break;
+    case Action::Stop:
+        key = "action.stop";
+        break;
+    case Action::SeekBack:
+        key = "action.seek_back";
+        break;
+    case Action::SeekForward:
+        key = "action.seek_forward";
+        break;
+    case Action::Loop:
+        key = "action.loop";
+        break;
+    case Action::ClearLoop:
+        key = "action.clear_loop";
+        break;
+    case Action::Metro:
+        key = "action.metro";
+        break;
+    case Action::Grid:
+        key = "action.grid";
+        break;
+    case Action::CountIn:
+        key = "action.count_in";
+        break;
+    case Action::Snap:
+        key = "action.snap";
+        break;
+    case Action::Mute:
+        key = "action.mute";
+        break;
+    case Action::Solo:
+        key = "action.solo";
+        break;
+    case Action::PrevTrack:
+        key = "action.prev_track";
+        break;
+    case Action::NextTrack:
+        key = "action.next_track";
+        break;
+    case Action::AdjustSpeed:
+        key = "action.adjust_speed";
+        break;
+    case Action::AdjustSeek:
+        key = "action.adjust_seek";
+        break;
+    case Action::AdjustMaster:
+        key = "action.adjust_master";
+        break;
+    case Action::AdjustClick:
+        key = "action.adjust_click";
+        break;
+    case Action::AdjustTrackGain:
+        key = "action.adjust_track_gain";
+        break;
+    case Action::AdjustTrackPan:
+        key = "action.adjust_track_pan";
+        break;
+    case Action::AdjustDown:
+        key = "action.adjust_down";
+        break;
+    case Action::AdjustUp:
+        key = "action.adjust_up";
+        break;
+    case Action::MidiCopy:
+        key = "action.midi_copy";
+        break;
+    case Action::MidiPaste:
+        key = "action.midi_paste";
+        break;
+    case Action::MidiDuplicate:
+        key = "action.midi_duplicate";
+        break;
+    case Action::MidiDelete:
+        key = "action.midi_delete";
+        break;
+    case Action::Count:
+        break;
+    }
+    return t(key, language);
+}
+
+Keymap default_keymap() {
+    Keymap map;
+    auto set = [&](Action action, KeyChord primary, KeyChord extra = {}) {
+        map.bindings[static_cast<std::size_t>(action)] = make_sequence(primary);
+        if (extra.key != 0) {
+            map.alternate[static_cast<std::size_t>(action)] = make_sequence(extra);
+        }
+    };
+    set(Action::Undo, make_chord(ImGuiKey_Z, false, true));
+    set(Action::Redo, make_chord(ImGuiKey_Z, true, true));
+    set(Action::PlayPause, make_chord(ImGuiKey_Z), make_chord(ImGuiKey_Space));
+    set(Action::Stop, make_chord(ImGuiKey_C));
+    set(Action::SeekBack, make_chord(ImGuiKey_A), make_chord(ImGuiKey_LeftArrow));
+    set(Action::SeekForward, make_chord(ImGuiKey_D), make_chord(ImGuiKey_RightArrow));
+    set(Action::Loop, make_chord(ImGuiKey_V));
+    set(Action::ClearLoop, make_chord(ImGuiKey_B));
+    set(Action::Metro, make_chord(ImGuiKey_R));
+    set(Action::Grid, make_chord(ImGuiKey_G));
+    set(Action::CountIn, make_chord(ImGuiKey_X));
+    set(Action::Snap, make_chord(ImGuiKey_N));
+    set(Action::Mute, make_chord(ImGuiKey_Q));
+    set(Action::Solo, make_chord(ImGuiKey_E));
+    set(Action::PrevTrack, make_chord(ImGuiKey_W), make_chord(ImGuiKey_UpArrow));
+    set(Action::NextTrack, make_chord(ImGuiKey_S), make_chord(ImGuiKey_DownArrow));
+    set(Action::AdjustSpeed, make_chord(ImGuiKey_1));
+    set(Action::AdjustSeek, make_chord(ImGuiKey_2));
+    set(Action::AdjustMaster, make_chord(ImGuiKey_3));
+    set(Action::AdjustClick, make_chord(ImGuiKey_4));
+    set(Action::AdjustTrackGain, make_chord(ImGuiKey_5));
+    set(Action::AdjustTrackPan, make_chord(ImGuiKey_6));
+    set(Action::AdjustDown, make_chord(ImGuiKey_A), make_chord(ImGuiKey_LeftArrow));
+    set(Action::AdjustUp, make_chord(ImGuiKey_D), make_chord(ImGuiKey_RightArrow));
+    set(Action::MidiCopy, make_chord(ImGuiKey_C, false, true));
+    set(Action::MidiPaste, make_chord(ImGuiKey_V, false, true));
+    set(Action::MidiDuplicate, make_chord(ImGuiKey_D, false, true));
+    set(Action::MidiDelete, make_chord(ImGuiKey_Delete), make_chord(ImGuiKey_Backspace));
+    return map;
 }
 
 void load_keymap(App& app) {
@@ -398,7 +893,7 @@ void load_keymap(App& app) {
             layout = std::atoi(line.substr(eq + 1).c_str());
             continue;
         }
-        if (layout != 2 && layout != 3) {
+        if (layout < 2 || layout > kLayoutVersion) {
             continue;
         }
         const Action action = action_from_id(line.substr(0, eq));
@@ -407,13 +902,15 @@ void load_keymap(App& app) {
         }
         const std::string value = line.substr(eq + 1);
         const auto bar = value.find('|');
-        const KeyChord primary = parse_chord(bar == std::string::npos ? value : value.substr(0, bar));
-        if (!reserved_chord(primary)) {
+        const std::string primary_text = bar == std::string::npos ? value : value.substr(0, bar);
+        KeySequence primary = layout >= 4 ? parse_sequence(primary_text) : make_sequence(parse_chord(primary_text));
+        if (!primary.empty() && !reserved_chord(primary.steps[0])) {
             app.keymap.bindings[static_cast<std::size_t>(action)] = primary;
         }
-        if (layout == 3 && bar != std::string::npos) {
-            const KeyChord extra = parse_chord(value.substr(bar + 1));
-            if (!reserved_chord(extra)) {
+        if ((layout == 3 || layout == 4) && bar != std::string::npos) {
+            const std::string extra_text = value.substr(bar + 1);
+            KeySequence extra = layout >= 4 ? parse_sequence(extra_text) : make_sequence(parse_chord(extra_text));
+            if (!extra.empty() && !reserved_chord(extra.steps[0])) {
                 app.keymap.alternate[static_cast<std::size_t>(action)] = extra;
             }
         }
@@ -421,7 +918,9 @@ void load_keymap(App& app) {
     if (layout == 2) {
         drop_reserved_alternates(app.keymap);
         save_keymap(app);
-    } else if (layout != 3) {
+    } else if (layout == 3) {
+        save_keymap(app);
+    } else if (layout != kLayoutVersion) {
         app.keymap = default_keymap();
         save_keymap(app);
     }
@@ -437,12 +936,12 @@ void save_keymap(const App& app) {
     if (!output) {
         return;
     }
-    output << "layout=3\n";
+    output << "layout=" << kLayoutVersion << '\n';
     for (int index = 0; index < kActionCount; ++index) {
         const auto action = static_cast<Action>(index);
         const auto at = static_cast<std::size_t>(index);
-        output << action_id(action) << '=' << chord_text(app.keymap.bindings[at]) << '|'
-               << chord_text(app.keymap.alternate[at]) << '\n';
+        output << action_id(action) << '=' << sequence_text(app.keymap.bindings[at]) << '|'
+               << sequence_text(app.keymap.alternate[at]) << '\n';
     }
 }
 
@@ -460,7 +959,6 @@ bool chord_pressed(const KeyChord& chord, bool repeat) {
     if (shift != chord.shift || ctrl != chord.ctrl || alt != chord.alt) {
         return false;
     }
-    // Space with any modifier is reserved for IME / layout switching.
     if (chord.key == ImGuiKey_Space && (shift || ctrl || alt)) {
         return false;
     }
@@ -489,6 +987,18 @@ std::string chord_text(const KeyChord& chord) {
     return text;
 }
 
+std::string sequence_text(const KeySequence& sequence) {
+    if (sequence.empty()) {
+        return "None";
+    }
+    std::string text = chord_text(sequence.steps[0]);
+    for (int index = 1; index < sequence.length; ++index) {
+        text += ',';
+        text += chord_text(sequence.steps[static_cast<std::size_t>(index)]);
+    }
+    return text;
+}
+
 bool capture_chord(KeyChord& out) {
     if (ImGui::IsKeyDown(ImGuiKey_LeftSuper) || ImGui::IsKeyDown(ImGuiKey_RightSuper) ||
         ImGui::IsKeyDown(ImGuiKey_Menu)) {
@@ -510,322 +1020,351 @@ bool capture_chord(KeyChord& out) {
         if (!bindable_key(key)) {
             continue;
         }
-        out = chord(key, shift, ctrl, alt);
+        out = make_chord(key, shift, ctrl, alt);
         return true;
     }
     return false;
 }
 
-std::string chord_with_seek(const Keymap& map, const KeyChord& binding, int slot) {
-    std::string shown = chord_text(binding);
-    if (binding.key == 0) {
-        return shown;
+void draw_shortcut_hints(App& app) {
+    if (!app.shortcut_hints || app.keymap_capture >= 0 || ime_owns_keyboard(app)) {
+        return;
     }
-    const KeyChord& back = slot == 0 ? map.bindings[static_cast<std::size_t>(Action::SeekBack)]
-                                     : map.alternate[static_cast<std::size_t>(Action::SeekBack)];
-    const KeyChord& forward = slot == 0 ? map.bindings[static_cast<std::size_t>(Action::SeekForward)]
-                                        : map.alternate[static_cast<std::size_t>(Action::SeekForward)];
-    const char* down = key_name(back.key);
-    const char* up = key_name(forward.key);
-    shown += " + ";
-    shown += down != nullptr ? down : "?";
-    shown += "/";
-    shown += up != nullptr ? up : "?";
-    return shown;
+
+    const Action project_order[] = {Action::Undo, Action::Redo};
+    const Action player_order[] = {
+        Action::PlayPause, Action::CountIn, Action::Stop, Action::Loop, Action::ClearLoop, Action::Snap,
+        Action::SeekBack, Action::SeekForward, Action::Metro, Action::Grid,
+        Action::AdjustSpeed, Action::AdjustSeek, Action::AdjustMaster, Action::AdjustClick,
+        Action::AdjustDown, Action::AdjustUp,
+    };
+    const Action track_order[] = {
+        Action::PrevTrack, Action::NextTrack, Action::Mute, Action::Solo,
+        Action::AdjustTrackGain, Action::AdjustTrackPan,
+    };
+    const Action midi_order[] = {
+        Action::MidiCopy, Action::MidiPaste, Action::MidiDuplicate, Action::MidiDelete,
+    };
+
+    if (app.hover_region == HoverRegion::Projects || app.hover_region == HoverRegion::Player) {
+        std::vector<std::pair<std::string, std::string>> rows;
+        if (app.hover_region == HoverRegion::Projects) {
+            append_action_hints(app, rows, project_order, sizeof project_order / sizeof project_order[0]);
+            draw_hint_panel(app.hover_projects, rows);
+        } else {
+            append_action_hints(app, rows, project_order, sizeof project_order / sizeof project_order[0]);
+            append_action_hints(app, rows, player_order, sizeof player_order / sizeof player_order[0]);
+            draw_hint_panel(app.hover_player, rows);
+        }
+    }
+    if (app.hover_region == HoverRegion::Mixer) {
+        std::vector<std::pair<std::string, std::string>> rows;
+        append_action_hints(app, rows, track_order, sizeof track_order / sizeof track_order[0]);
+        draw_hint_panel(app.hover_mixer, rows);
+    }
+    if (app.hover_region == HoverRegion::Midi) {
+        std::vector<std::pair<std::string, std::string>> midi_rows;
+        if (app.note_stage == NoteStage::Midi) {
+            append_action_hints(app, midi_rows, midi_order, sizeof midi_order / sizeof midi_order[0]);
+            midi_rows.emplace_back(t("hint.middle_drag"), t("hint.midi_pan"));
+            midi_rows.emplace_back(t("hint.ctrl_wheel"), t("hint.midi_zoom"));
+            midi_rows.emplace_back(t("hint.ctrl_shift_wheel"), t("hint.midi_zoom_pitch"));
+            midi_rows.emplace_back(t("hint.shift_left"), t("hint.midi_box"));
+            midi_rows.emplace_back(t("hint.ctrl"), t("hint.midi_nosnap"));
+            if (app.roll_paste) {
+                midi_rows.emplace_back(t("hint.paste_confirm_key"), t("hint.midi_paste_commit"));
+                midi_rows.emplace_back(t("hint.paste_cancel_key"), t("hint.midi_paste_cancel"));
+            }
+            midi_rows.emplace_back(t("hint.right_drag"), t("hint.midi_erase"));
+            midi_rows.emplace_back(t("hint.left_empty"), t("hint.midi_place"));
+            midi_rows.emplace_back(t("hint.left_note"), t("hint.midi_edit"));
+        } else if (app.note_stage == NoteStage::View && app.midi_view == MidiView::Fall) {
+            midi_rows.emplace_back(t("hint.left_drag"), t("hint.fall_scrub"));
+            midi_rows.emplace_back(t("hint.right_drag"), t("hint.fall_loop"));
+        }
+        draw_hint_panel(app.hover_midi, midi_rows);
+    }
 }
 
 void draw_keymap_settings(App& app) {
     const float scale = ImGui::GetIO().FontGlobalScale > 0.f ? ImGui::GetIO().FontGlobalScale : 1.f;
-    ImGui::TextUnformatted(t("shortcut.heading"));
+    if (ImGui::Checkbox(t("shortcut.hints"), &app.shortcut_hints)) {
+        save_performance(app);
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", t("shortcut.sequence_help"));
+    ImGui::Spacing();
     const char* reset_label = t("shortcut.reset");
     const float gap = 4.f * scale;
     const float reset_w = ImGui::CalcTextSize(reset_label).x + ImGui::GetStyle().FramePadding.x * 2.f;
     struct Reject {
         int index = -1;
         int kind = 0;
-        int other = -1;
     };
     static Reject reject;
     const Keymap defaults = default_keymap();
-    // Stage views, then each mixer strip, then the transport row and the waveform under it.
-    const Action order[] = {
-        Action::ViewGuitar, Action::ViewBass, Action::ViewFall,
-        Action::PrevTrack, Action::NextTrack, Action::AdjustTrackGain, Action::AdjustTrackPan, Action::Mute, Action::Solo,
+
+    const Action project_order[] = {Action::Undo, Action::Redo};
+    const Action player_order[] = {
         Action::PlayPause, Action::CountIn, Action::Stop, Action::Loop, Action::ClearLoop, Action::Snap,
-        Action::AdjustSpeed, Action::AdjustSeek, Action::AdjustMaster, Action::AdjustClick, Action::Metro,
-        Action::SeekBack, Action::SeekForward,
+        Action::SeekBack, Action::SeekForward, Action::Metro, Action::Grid,
+        Action::AdjustSpeed, Action::AdjustSeek, Action::AdjustMaster, Action::AdjustClick,
+        Action::AdjustDown, Action::AdjustUp,
     };
-    static_assert(sizeof order / sizeof order[0] == static_cast<std::size_t>(Action::Count));
-    for (const Action action : order) {
-        const auto at = static_cast<std::size_t>(action);
-        const int index = static_cast<int>(action);
-        const bool adjust = action >= Action::AdjustSpeed && action <= Action::AdjustTrackPan;
-        ImGui::PushID(index);
-        ImGui::TextUnformatted(action_label(action, i18n_language()));
-        ImGui::SameLine(0.f, gap);
-        const float spare = ImGui::GetContentRegionAvail().x;
-        if (spare > reset_w) {
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + spare - reset_w);
-        }
-        if (ImGui::SmallButton(reset_label)) {
-            app.keymap.bindings[at] = defaults.bindings[at];
-            app.keymap.alternate[at] = defaults.alternate[at];
-            save_keymap(app);
-            app.keymap_capture = -1;
-            reject = {};
-        }
-        const float key_w = std::max(1.f, (ImGui::GetContentRegionAvail().x - gap) * 0.5f);
-        for (int slot = 0; slot < 2; ++slot) {
-            KeyChord& binding = slot == 0 ? app.keymap.bindings[at] : app.keymap.alternate[at];
-            const int capture_id = index * 2 + slot;
-            const bool capturing = app.keymap_capture == capture_id;
-            ImGui::PushID(slot);
-            if (slot == 1) {
-                ImGui::SameLine(0.f, gap);
+    const Action track_order[] = {
+        Action::PrevTrack, Action::NextTrack, Action::AdjustTrackGain, Action::AdjustTrackPan, Action::Mute,
+        Action::Solo,
+    };
+    const Action midi_order[] = {
+        Action::MidiCopy, Action::MidiPaste, Action::MidiDuplicate, Action::MidiDelete,
+    };
+
+    auto draw_group = [&](const char* heading, const Action* order, std::size_t count) {
+        ImGui::Spacing();
+        ImGui::TextUnformatted(heading);
+        for (std::size_t order_i = 0; order_i < count; ++order_i) {
+            const Action action = order[order_i];
+            const auto at = static_cast<std::size_t>(action);
+            const int index = static_cast<int>(action);
+            const bool adjust = adjust_layer_action(action);
+            ImGui::PushID(index);
+            ImGui::TextUnformatted(action_label(action, i18n_language()));
+            ImGui::SameLine(0.f, gap);
+            const float spare = ImGui::GetContentRegionAvail().x;
+            if (spare > reset_w) {
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + spare - reset_w);
             }
-            const std::string shown = adjust ? chord_with_seek(app.keymap, binding, slot) : chord_text(binding);
-            const std::string label = capturing ? t("shortcut.press") : shown;
-            const bool clash = !capturing && binding.key != 0 && conflict_of(app.keymap, action, slot, binding) >= 0;
-            if (clash) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.14f, 0.14f, 1.f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.78f, 0.20f, 0.20f, 1.f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.48f, 0.10f, 0.10f, 1.f));
-            }
-            if (ImGui::Button(label.c_str(), ImVec2(key_w, 0.f))) {
-                app.keymap_capture = capturing ? -1 : capture_id;
-                reject = {};
-            }
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && binding.key != 0) {
-                binding = {};
-                if (app.keymap_capture == capture_id) {
-                    app.keymap_capture = -1;
-                }
-                reject = {};
+            if (ImGui::SmallButton(reset_label)) {
+                app.keymap.bindings[at] = defaults.bindings[at];
+                app.keymap.alternate[at] = defaults.alternate[at];
                 save_keymap(app);
+                app.keymap_capture = -1;
+                app.keymap_draft = {};
+                reject = {};
             }
-            if (clash) {
-                ImGui::PopStyleColor(3);
-            }
-            if (capturing) {
-                if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                    app.keymap_capture = -1;
+            const float key_w = std::max(1.f, (ImGui::GetContentRegionAvail().x - gap) * 0.5f);
+            for (int slot = 0; slot < 2; ++slot) {
+                KeySequence& binding = slot == 0 ? app.keymap.bindings[at] : app.keymap.alternate[at];
+                const int capture_id = index * 2 + slot;
+                const bool capturing = app.keymap_capture == capture_id;
+                ImGui::PushID(slot);
+                if (slot == 1) {
+                    ImGui::SameLine(0.f, gap);
+                }
+                const std::string shown = capturing
+                    ? (app.keymap_draft.empty() ? t("shortcut.press") : sequence_text(app.keymap_draft) + " …")
+                    : (adjust ? sequence_hint(app.keymap, action, slot) : sequence_text(binding));
+                const bool clash =
+                    !capturing && !binding.empty() && conflict_of(app.keymap, action, slot, binding) >= 0;
+                if (clash) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.14f, 0.14f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.78f, 0.20f, 0.20f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.48f, 0.10f, 0.10f, 1.f));
+                }
+                if (ImGui::Button(shown.c_str(), ImVec2(key_w, 0.f))) {
+                    app.keymap_capture = capturing ? -1 : capture_id;
+                    app.keymap_draft = {};
+                    app.keymap_draft_at = 0;
                     reject = {};
-                } else if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+                }
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && !binding.empty()) {
+                    if (app.keymap_capture == capture_id) {
+                        app.keymap_capture = -1;
+                        app.keymap_draft = {};
+                    }
                     binding = {};
-                    app.keymap_capture = -1;
                     reject = {};
                     save_keymap(app);
-                } else if (!ime_owns_keyboard(app)) {
-                    KeyChord next{};
-                    if (capture_chord(next)) {
-                        const bool plain = !next.ctrl && !next.shift && !next.alt;
-                        if (reserved_chord(next)) {
-                            reject = {capture_id, 2, -1};
+                }
+                if (clash) {
+                    ImGui::PopStyleColor(3);
+                }
+                if (capturing) {
+                    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                        app.keymap_capture = -1;
+                        app.keymap_draft = {};
+                        reject = {};
+                    } else if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && app.keymap_draft.empty()) {
+                        binding = {};
+                        app.keymap_capture = -1;
+                        reject = {};
+                        save_keymap(app);
+                    } else if (ImGui::IsKeyPressed(ImGuiKey_Enter) && !app.keymap_draft.empty()) {
+                        const int clash_with = conflict_of(app.keymap, action, slot, app.keymap_draft);
+                        const bool plain = app.keymap_draft.length == 1 && !app.keymap_draft.steps[0].ctrl &&
+                                           !app.keymap_draft.steps[0].shift && !app.keymap_draft.steps[0].alt;
+                        if (reserved_chord(app.keymap_draft.steps[0])) {
+                            reject = {capture_id, 2};
                         } else if (adjust && !plain) {
-                            reject = {capture_id, 3, -1};
+                            reject = {capture_id, 3};
+                        } else if (clash_with >= 0) {
+                            reject = {capture_id, 4};
                         } else {
-                            binding = next;
+                            binding = app.keymap_draft;
                             save_keymap(app);
                             app.keymap_capture = -1;
+                            app.keymap_draft = {};
                             reject = {};
                         }
+                    } else if (!ime_owns_keyboard(app)) {
+                        KeyChord next{};
+                        if (capture_chord(next)) {
+                            if (next.key == ImGuiKey_Backspace && app.keymap_draft.empty()) {
+                                // handled above
+                            } else if (app.keymap_draft.length < kMaxSequenceSteps) {
+                                app.keymap_draft.steps[static_cast<std::size_t>(app.keymap_draft.length++)] = next;
+                                app.keymap_draft_at = ImGui::GetTime();
+                            }
+                        } else if (
+                            !app.keymap_draft.empty() && app.keymap_draft_at > 0 &&
+                            ImGui::GetTime() - app.keymap_draft_at >= kSequenceTimeout) {
+                            const int clash_with = conflict_of(app.keymap, action, slot, app.keymap_draft);
+                            const bool plain = app.keymap_draft.length == 1 && !app.keymap_draft.steps[0].ctrl &&
+                                               !app.keymap_draft.steps[0].shift && !app.keymap_draft.steps[0].alt;
+                            if (reserved_chord(app.keymap_draft.steps[0])) {
+                                reject = {capture_id, 2};
+                                app.keymap_draft = {};
+                            } else if (adjust && !plain) {
+                                reject = {capture_id, 3};
+                                app.keymap_draft = {};
+                            } else if (clash_with >= 0) {
+                                reject = {capture_id, 4};
+                                app.keymap_draft = {};
+                            } else {
+                                binding = app.keymap_draft;
+                                save_keymap(app);
+                                app.keymap_capture = -1;
+                                app.keymap_draft = {};
+                                reject = {};
+                            }
+                        }
                     }
+                }
+                ImGui::PopID();
+            }
+            if (reject.index / 2 == index) {
+                const char* note = nullptr;
+                if (reject.kind == 2) {
+                    note = t("shortcut.reserved");
+                } else if (reject.kind == 3) {
+                    note = t("shortcut.no_modifiers");
+                } else if (reject.kind == 4) {
+                    note = t("shortcut.conflict");
+                }
+                if (note != nullptr) {
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
+                    ImGui::TextDisabled("%s", note);
+                    ImGui::PopTextWrapPos();
                 }
             }
             ImGui::PopID();
         }
-        if (reject.index / 2 == index) {
-            const char* note = nullptr;
-            if (reject.kind == 2) {
-                note = t("shortcut.reserved");
-            } else if (reject.kind == 3) {
-                note = t("shortcut.no_modifiers");
-            }
-            if (note != nullptr) {
-                ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
-                ImGui::TextDisabled("%s", note);
-                ImGui::PopTextWrapPos();
-            }
-        }
-        ImGui::PopID();
-    }
+    };
+
+    draw_group(t("shortcut.scope_project"), project_order, sizeof project_order / sizeof project_order[0]);
+    draw_group(t("shortcut.scope_player"), player_order, sizeof player_order / sizeof player_order[0]);
+    draw_group(t("shortcut.scope_track"), track_order, sizeof track_order / sizeof track_order[0]);
+    draw_group(t("shortcut.scope_midi"), midi_order, sizeof midi_order / sizeof midi_order[0]);
+
     if (ImGui::Button(
             t("shortcut.reset_all"),
             ImVec2(std::max(1.f, ImGui::GetContentRegionAvail().x), 0.f))) {
         app.keymap = default_keymap();
         save_keymap(app);
         app.keymap_capture = -1;
-    }
-}
-
-bool layer_held(const KeyChord& chord) {
-    if (chord.key == 0 || chord.ctrl || chord.shift || chord.alt || reserved_chord(chord)) {
-        return false;
-    }
-    if (ImGui::IsKeyDown(ImGuiKey_LeftSuper) || ImGui::IsKeyDown(ImGuiKey_RightSuper) || ImGui::IsKeyDown(ImGuiKey_Menu) ||
-        ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift) ||
-        ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl) ||
-        ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)) {
-        return false;
-    }
-    return ImGui::IsKeyDown(static_cast<ImGuiKey>(chord.key));
-}
-
-float snap_step(float value, float min_value, float max_value, float step) {
-    const float steps = std::round((value - min_value) / step);
-    return std::clamp(min_value + steps * step, min_value, max_value);
-}
-
-void nudge_layer(App& app, Action layer, int direction) {
-    switch (layer) {
-    case Action::AdjustSpeed:
-        app.speed = snap_step(app.speed + 0.1f * static_cast<float>(direction), 0.1f, 2.f, 0.1f);
-        if (app.speed != app.applied_speed) {
-            app.applied_speed = app.speed;
-            app.player->set_speed(app.speed);
-        }
-        break;
-    case Action::AdjustSeek:
-        app.seek_step = snap_step(app.seek_step + static_cast<float>(direction), 1.f, 20.f, 1.f);
-        save_performance(app);
-        break;
-    case Action::AdjustMaster:
-        app.master_db = snap_step(app.master_db + static_cast<float>(direction), -60.f, 6.f, 1.f);
-        app.player->set_master_db(app.master_db);
-        break;
-    case Action::AdjustClick:
-        app.click_db = snap_step(app.click_db + static_cast<float>(direction), -60.f, 6.f, 1.f);
-        app.player->set_metronome(app.metro, app.bpm, app.click_db, app.beat_offset, true, app.beat_times);
-        break;
-    case Action::AdjustTrackGain:
-        if (app.session != nullptr && app.selected >= 0 && app.selected < bt::kStemCount) {
-            float& db = app.gain_db[static_cast<std::size_t>(app.selected)];
-            db = snap_step(db + static_cast<float>(direction), -60.f, 6.f, 1.f);
-            app.session->set_gain(app.selected, std::pow(10.f, db / 20.f));
-        }
-        break;
-    case Action::AdjustTrackPan:
-        if (app.session != nullptr && app.selected >= 0 && app.selected < bt::kStemCount) {
-            float& pan = app.pan[static_cast<std::size_t>(app.selected)];
-            pan = snap_step(pan + 0.05f * static_cast<float>(direction), -1.f, 1.f, 0.05f);
-            app.session->set_pan(app.selected, pan);
-        }
-        break;
-    default:
-        break;
+        app.keymap_draft = {};
     }
 }
 
 void handle_actions(App& app, bool ready) {
-    if (app.player == nullptr || ImGui::IsAnyItemActive() || app.keymap_capture >= 0) {
+    if (app.keymap_capture >= 0 || ime_owns_keyboard(app) || ImGui::GetIO().WantTextInput) {
+        clear_seq_runtime();
+        return;
+    }
+    if (app.player == nullptr || ImGui::IsAnyItemActive()) {
+        clear_seq_runtime();
         return;
     }
     if (app.settings_panel) {
+        clear_seq_runtime();
         return;
     }
-    if (ime_owns_keyboard(app)) {
-        return;
-    }
+
     const auto transport = app.player->snapshot();
     const auto& map = app.keymap;
-    const auto pressed = [&](Action action, bool repeat) {
-        const auto index = static_cast<std::size_t>(action);
-        return chord_pressed(map.bindings[index], repeat) || chord_pressed(map.alternate[index], repeat);
-    };
     const auto layer_down = [&](Action action) {
-        const auto index = static_cast<std::size_t>(action);
-        return layer_held(map.bindings[index]) || layer_held(map.alternate[index]);
+        return layer_held(map.bindings[static_cast<std::size_t>(action)]) ||
+               layer_held(map.alternate[static_cast<std::size_t>(action)]);
     };
-
-    if (ready && pressed(Action::PlayPause, false)) {
-        start_or_pause(app, transport);
-    }
-    if (ready && pressed(Action::Stop, false)) {
-        app.player->stop();
-    }
 
     Action held = Action::Count;
     int holds = 0;
-    for (int index = static_cast<int>(Action::AdjustSpeed); index <= static_cast<int>(Action::AdjustTrackPan); ++index) {
-        if (layer_down(static_cast<Action>(index))) {
-            held = static_cast<Action>(index);
+    for (Action layer :
+         {Action::AdjustSpeed, Action::AdjustSeek, Action::AdjustMaster, Action::AdjustClick, Action::AdjustTrackGain,
+          Action::AdjustTrackPan}) {
+        if (layer_down(layer)) {
+            held = layer;
             ++holds;
         }
     }
     if (holds > 1) {
+        clear_seq_runtime();
         return;
     }
     if (holds == 1) {
-        const auto held_index = static_cast<std::size_t>(held);
-        const auto is_layer_key = [&](const KeyChord& direction) {
-            return same_chord(direction, map.bindings[held_index]) || same_chord(direction, map.alternate[held_index]);
+        const auto is_layer_key = [&](const KeySequence& sequence) {
+            return sequence.length == 1 &&
+                   (same_chord(sequence.steps[0], map.bindings[static_cast<std::size_t>(held)].steps[0]) ||
+                    (!map.alternate[static_cast<std::size_t>(held)].empty() &&
+                     same_chord(sequence.steps[0], map.alternate[static_cast<std::size_t>(held)].steps[0])));
         };
-        const auto back = static_cast<std::size_t>(Action::SeekBack);
-        const auto forward = static_cast<std::size_t>(Action::SeekForward);
         bool nudged = false;
-        if ((chord_pressed(map.bindings[back], true) && !is_layer_key(map.bindings[back])) ||
-            (chord_pressed(map.alternate[back], true) && !is_layer_key(map.alternate[back]))) {
+        const bool down = action_fired(map, Action::AdjustDown, true) || action_fired(map, Action::SeekBack, true);
+        const bool up = action_fired(map, Action::AdjustUp, true) || action_fired(map, Action::SeekForward, true);
+        if (down) {
             nudge_layer(app, held, -1);
             nudged = true;
         }
-        if ((chord_pressed(map.bindings[forward], true) && !is_layer_key(map.bindings[forward])) ||
-            (chord_pressed(map.alternate[forward], true) && !is_layer_key(map.alternate[forward]))) {
+        if (up) {
             nudge_layer(app, held, 1);
             nudged = true;
         }
-        const bool layer_just_pressed =
-            chord_pressed(map.bindings[held_index], false) || chord_pressed(map.alternate[held_index], false);
+        const bool layer_just_pressed = action_fired(map, held, false);
         if (nudged || !layer_just_pressed) {
+            clear_seq_runtime();
             return;
+        }
+        (void)is_layer_key;
+    }
+
+    // Repeatable seeks (length-1 only).
+    if (ready && holds == 0) {
+        if (action_fired(map, Action::SeekBack, true) &&
+            map.bindings[static_cast<std::size_t>(Action::SeekBack)].length <= 1) {
+            fire_action(app, Action::SeekBack, ready, transport);
+        }
+        if (action_fired(map, Action::SeekForward, true) &&
+            map.bindings[static_cast<std::size_t>(Action::SeekForward)].length <= 1) {
+            fire_action(app, Action::SeekForward, ready, transport);
         }
     }
 
-    const bool back = ready && pressed(Action::SeekBack, true);
-    const bool forward = ready && pressed(Action::SeekForward, true);
-    if (back || forward) {
-        double step = static_cast<double>(std::clamp(app.seek_step, 1.f, 20.f));
-        if (back) {
-            step = -step;
+    const Action matched = match_sequence_edge(map, false);
+    if (matched == Action::Count) {
+        return;
+    }
+    if (matched == Action::SeekBack || matched == Action::SeekForward) {
+        // Already handled via repeat path for length-1; multi-step seek still fires here.
+        if (map.bindings[static_cast<std::size_t>(matched)].length > 1 ||
+            map.alternate[static_cast<std::size_t>(matched)].length > 1) {
+            fire_action(app, matched, ready, transport);
         }
-        app.player->seek(transport.position + step * static_cast<double>(transport.speed));
+        return;
     }
-    if (ready && pressed(Action::Loop, false)) {
-        app.player->set_loop_enabled(!transport.loop);
+    if (matched == Action::AdjustDown || matched == Action::AdjustUp || adjust_layer_action(matched)) {
+        return;
     }
-    if (pressed(Action::ClearLoop, false)) {
-        app.player->clear_loop();
-    }
-    if (pressed(Action::Metro, false)) {
-        app.metro = !app.metro;
-        app.player->set_metronome(app.metro, app.bpm, app.click_db, app.beat_offset, true, app.beat_times);
-    }
-    if (pressed(Action::CountIn, false)) {
-        app.count_in = !app.count_in;
-    }
-    if (pressed(Action::Snap, false)) {
-        app.loop_snap = !app.loop_snap;
-    }
-    if (ready && pressed(Action::Mute, false)) {
-        apply_mute_or_solo(app, false);
-    }
-    if (ready && pressed(Action::Solo, false)) {
-        apply_mute_or_solo(app, true);
-    }
-    if (pressed(Action::PrevTrack, false)) {
-        app.selected = (app.selected + bt::kStemCount - 1) % bt::kStemCount;
-    }
-    if (pressed(Action::NextTrack, false)) {
-        app.selected = (app.selected + 1) % bt::kStemCount;
-    }
-    if (pressed(Action::ViewGuitar, false)) {
-        app.midi_view = MidiView::Guitar;
-    }
-    if (pressed(Action::ViewBass, false)) {
-        app.midi_view = MidiView::Bass;
-    }
-    if (pressed(Action::ViewFall, false)) {
-        app.midi_view = MidiView::Fall;
-    }
+    fire_action(app, matched, ready, transport);
 }
 
 }  // namespace btapp

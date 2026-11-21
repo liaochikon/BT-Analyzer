@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 
@@ -90,6 +92,15 @@ bt::SessionOptions options_with(const std::filesystem::path& cache, const bt::Se
     return options;
 }
 
+void require_near_pcm(const std::vector<float>& stored, const std::vector<float>& live) {
+    REQUIRE(stored.size() == live.size());
+    float worst = 0.f;
+    for (std::size_t index = 0; index < live.size(); ++index) {
+        worst = std::max(worst, std::fabs(stored[index] - live[index]));
+    }
+    REQUIRE(worst < 1.5f / 32768.f);
+}
+
 std::shared_ptr<const bt::SongSnapshot> require_settled(bt::Session& session, std::uint64_t job) {
     auto snapshot = session.wait_for(job, std::chrono::seconds(5));
     REQUIRE(snapshot != nullptr);
@@ -120,7 +131,7 @@ TEST_CASE("session reuses a cache entry for the same file bytes") {
     REQUIRE(first->project_hash.size() == 64);
     REQUIRE(first->cache_directory.filename() == std::filesystem::path("song_" + first->project_hash));
     REQUIRE(std::filesystem::exists(first->cache_directory / "song.txt"));
-    REQUIRE(first->mix != nullptr);
+    REQUIRE(first->mix == nullptr);
     REQUIRE(first->stems != nullptr);
     REQUIRE(first->gain[4] == 1.f);
     const int computed = calls.load();
@@ -140,7 +151,7 @@ TEST_CASE("session reuses a cache entry for the same file bytes") {
     REQUIRE(second->phase == bt::SongPhase::Ready);
     REQUIRE(second->from_cache);
     REQUIRE(calls.load() == computed);
-    REQUIRE(second->stems->audio[0] == first->stems->audio[0]);
+    require_near_pcm(second->stems->audio[0], first->stems->audio[0]);
 
     std::filesystem::copy_file(song, copy);
     const auto aliased = require_settled(*session, session->open_song(copy));
@@ -161,7 +172,7 @@ TEST_CASE("session reuses a cache entry for the same file bytes") {
     const auto warmed = require_settled(*session, session->open_song(song));
     REQUIRE(warmed->from_cache);
     REQUIRE(reopened.load() == 0);
-    REQUIRE(warmed->stems->audio[5] == expected->audio[5]);
+    require_near_pcm(warmed->stems->audio[5], expected->audio[5]);
 
     const auto other = ramp(400, -0.5f);
     REQUIRE(bt::write_float_wav(song, other.samples.data(), other.channels, other.frames).has_value());
@@ -169,6 +180,49 @@ TEST_CASE("session reuses a cache entry for the same file bytes") {
     REQUIRE(changed->phase == bt::SongPhase::Ready);
     REQUIRE_FALSE(changed->from_cache);
     REQUIRE(reopened.load() > 0);
+}
+
+TEST_CASE("session refresh replaces a cache entry") {
+    TempDir temp("bt-session-refresh");
+    const auto song = temp.path / "song.wav";
+    const auto audio = ramp(400, 1.f);
+    REQUIRE(bt::write_float_wav(song, audio.samples.data(), audio.channels, audio.frames).has_value());
+
+    std::atomic<int> calls{0};
+    auto created = bt::Session::create(options_with(temp.path / "cache", [&](const float* mix, float* stems, int n) {
+        ++calls;
+        identity(mix, stems, n);
+    }));
+    REQUIRE(created.has_value());
+    auto session = std::move(*created);
+
+    const auto first = require_settled(*session, session->open_song(song));
+    REQUIRE(first->phase == bt::SongPhase::Ready);
+    REQUIRE_FALSE(first->from_cache);
+    const int computed = calls.load();
+    REQUIRE(computed > 0);
+
+    const auto cached = require_settled(*session, session->open_song(song));
+    REQUIRE(cached->from_cache);
+    REQUIRE(calls.load() == computed);
+    {
+        std::ofstream beats(cached->cache_directory / "beats.txt", std::ios::binary);
+        REQUIRE(beats.good());
+        beats << "1\n";
+    }
+
+    const auto refreshed = require_settled(*session, session->open_song(song, true));
+    REQUIRE(refreshed->phase == bt::SongPhase::Ready);
+    REQUIRE_FALSE(refreshed->from_cache);
+    REQUIRE(calls.load() > computed);
+    REQUIRE(refreshed->project_name == "song");
+    REQUIRE(std::filesystem::exists(refreshed->cache_directory / "song.txt"));
+    REQUIRE_FALSE(std::filesystem::exists(refreshed->cache_directory / "beats.txt"));
+    REQUIRE_FALSE(std::filesystem::exists(std::filesystem::path(refreshed->cache_directory.wstring() + L".replacing")));
+    // The replaced folder is kept for undo, outside the project folder.
+    REQUIRE_FALSE(refreshed->replaced_directory.empty());
+    REQUIRE(std::filesystem::exists(refreshed->replaced_directory / "beats.txt"));
+    REQUIRE(refreshed->replaced_directory.parent_path() == refreshed->cache_directory.parent_path());
 }
 
 TEST_CASE("session cancel takes effect before the next segment and writes no cache") {

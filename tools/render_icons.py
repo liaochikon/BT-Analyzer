@@ -6,7 +6,7 @@ import json
 import math
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageOps
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "assets" / "icons"
@@ -43,6 +43,8 @@ ICONS = [
     "again",
     "rerun",
     "magnet",
+    "undo",
+    "redo",
     "count",
 ]
 
@@ -234,18 +236,37 @@ def draw_reset(d: ImageDraw.ImageDraw) -> None:
 
 
 def draw_gear(d: ImageDraw.ImageDraw) -> None:
+    # Unused: gear is filled then punched in draw_gear_full so the hub stays a hole.
+    del d
+
+
+def draw_gear_full(img: Image.Image) -> None:
+    """Six broad teeth around a ring, with a round hub hole. Reads as a cog at ~20px."""
+    d = ImageDraw.Draw(img)
     b = box()
     cx, cy = mid(b)
     s = min(wh(b)) * 0.5
-    sw = int(stroke())
-    d.ellipse((cx - s * 0.32, cy - s * 0.32, cx + s * 0.32, cy + s * 0.32), outline=white(), width=sw)
-    for i in range(8):
-        a = i / 8 * math.tau
-        x0 = cx + math.cos(a) * s * 0.42
-        y0 = cy + math.sin(a) * s * 0.42
-        x1 = cx + math.cos(a) * s * 0.92
-        y1 = cy + math.sin(a) * s * 0.92
-        d.line((x0, y0, x1, y1), fill=white(), width=sw)
+    outer = s * 0.98
+    root = s * 0.66
+    teeth = 6
+    half_tip = math.radians(13)
+    half_root = math.radians(20)
+    points: list[tuple[float, float]] = []
+    for i in range(teeth):
+        base = -math.pi / 2 + i * (math.tau / teeth)
+        for ang, rad in (
+            (base - half_root, root),
+            (base - half_tip, outer),
+            (base + half_tip, outer),
+            (base + half_root, root),
+        ):
+            points.append((cx + math.cos(ang) * rad, cy + math.sin(ang) * rad))
+    d.polygon(points, fill=white())
+    hole = s * 0.30
+    cut = Image.new("L", img.size, 0)
+    ImageDraw.Draw(cut).ellipse((cx - hole, cy - hole, cx + hole, cy + hole), fill=255)
+    r, g, bl, a = img.split()
+    img.putalpha(ImageChops.subtract(a, cut))
 
 
 def draw_metro(d: ImageDraw.ImageDraw) -> None:
@@ -488,6 +509,19 @@ def draw_magnet(d: ImageDraw.ImageDraw) -> None:
     d.rectangle((cx + s * 0.7 - pw * 0.5, cy + s * 0.55, cx + s * 0.7 + pw * 0.5, cy + s * 0.95), fill=white())
 
 
+def draw_redo(d: ImageDraw.ImageDraw) -> None:
+    b = box()
+    cx, cy = mid(b)
+    r = min(wh(b)) * 0.32
+    # Head lands on top. Clockwise tangent there points right.
+    _arc_arrow(d, cx, cy + r * 0.08, r, 35, 270)
+
+
+def draw_undo(d: ImageDraw.ImageDraw) -> None:
+    # Replaced by a mirrored redo in render_one. Kept so the drawer table stays complete.
+    draw_redo(d)
+
+
 def draw_count(d: ImageDraw.ImageDraw) -> None:
     b = box()
     cx, cy = mid(b)
@@ -524,6 +558,8 @@ DRAWERS = {
     "again": draw_again,
     "rerun": draw_rerun,
     "magnet": draw_magnet,
+    "undo": draw_undo,
+    "redo": draw_redo,
     "count": draw_count,
 }
 
@@ -532,6 +568,13 @@ def render_one(name: str) -> Image.Image:
     if name == "metro":
         img = Image.new("RGBA", (RENDER, RENDER), (0, 0, 0, 0))
         draw_metro_full(img)
+    elif name == "gear":
+        img = Image.new("RGBA", (RENDER, RENDER), (0, 0, 0, 0))
+        draw_gear_full(img)
+    elif name == "undo":
+        img, d = new_glyph()
+        draw_redo(d)
+        img = ImageOps.mirror(img)
     else:
         img, d = new_glyph()
         DRAWERS[name](d)

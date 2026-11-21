@@ -87,6 +87,10 @@ const char* icon_key(Icon icon) {
         return "rerun";
     case Icon::Magnet:
         return "magnet";
+    case Icon::Undo:
+        return "undo";
+    case Icon::Redo:
+        return "redo";
     case Icon::Count:
         return "count";
     }

@@ -90,3 +90,59 @@ TEST_CASE("edge blanks continue from the nearest beat at the regions average tem
     bt::extend_beat_edges(empty, 8.0);
     REQUIRE(empty.times.empty());
 }
+
+TEST_CASE("a steady pulse locks to one bpm lattice") {
+    bt::BeatGrid grid;
+    grid.bpm = 120.f;
+    const double interval = 0.5;
+    for (int index = 0; index < 32; ++index) {
+        const double wobble = (index % 2 == 0) ? 0.018 : -0.012;
+        grid.times.push_back(0.4 + index * interval + wobble);
+    }
+    bt::regularize_beat_grid(grid, 16.0);
+    REQUIRE(grid.spans.size() == 1);
+    REQUIRE(grid.spans.front().start == 0.0);
+    REQUIRE_THAT(grid.spans.front().end, Catch::Matchers::WithinAbs(16.0, 1e-6));
+    REQUIRE_THAT(grid.spans.front().bpm, Catch::Matchers::WithinAbs(120.0, 1.0));
+    REQUIRE(grid.times.size() > 20);
+    for (std::size_t index = 1; index < grid.times.size(); ++index) {
+        REQUIRE_THAT(grid.times[index] - grid.times[index - 1], Catch::Matchers::WithinAbs(0.5, 0.01));
+    }
+}
+
+TEST_CASE("a lasting tempo change splits the waveform into spans") {
+    bt::BeatGrid grid;
+    grid.bpm = 100.f;
+    for (double time = 0.0; time < 6.0 - 1e-6; time += 0.6) {
+        grid.times.push_back(time);
+    }
+    for (double time = 6.0; time < 12.0 - 1e-6; time += 60.0 / 140.0) {
+        grid.times.push_back(time);
+    }
+    bt::regularize_beat_grid(grid, 12.0);
+    REQUIRE(grid.spans.size() == 2);
+    REQUIRE_THAT(grid.spans[0].bpm, Catch::Matchers::WithinAbs(100.0, 2.0));
+    REQUIRE_THAT(grid.spans[1].bpm, Catch::Matchers::WithinAbs(140.0, 2.0));
+    REQUIRE_THAT(grid.spans[0].start, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(grid.spans[0].end, Catch::Matchers::WithinAbs(6.0, 0.2));
+    REQUIRE_THAT(grid.spans[1].end, Catch::Matchers::WithinAbs(12.0, 1e-6));
+}
+
+TEST_CASE("a double time stretch stays on the same bpm") {
+    bt::BeatGrid grid;
+    grid.bpm = 120.f;
+    for (int index = 0; index < 16; ++index) {
+        grid.times.push_back(index * 0.5);
+    }
+    const double join = grid.times.back();
+    for (int index = 1; index <= 12; ++index) {
+        grid.times.push_back(join + index * 0.25);
+    }
+    const double resume = grid.times.back();
+    for (int index = 1; index <= 16; ++index) {
+        grid.times.push_back(resume + index * 0.5);
+    }
+    bt::regularize_beat_grid(grid, grid.times.back() + 0.5);
+    REQUIRE(grid.spans.size() == 1);
+    REQUIRE_THAT(grid.spans.front().bpm, Catch::Matchers::WithinAbs(120.0, 2.0));
+}
