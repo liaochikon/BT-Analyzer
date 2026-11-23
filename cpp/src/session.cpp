@@ -113,28 +113,36 @@ bool valid_model_key(const std::string& key) {
 std::expected<std::shared_ptr<const Stems>, std::string> read_cached_stems(const std::filesystem::path& directory) {
     auto stems = std::make_shared<Stems>();
     for (int stem = 0; stem < kStemCount; ++stem) {
-        const auto name = std::string(kStemNames[static_cast<std::size_t>(stem)]);
-        auto audio = read_float_wav(directory / (name + ".wav"));
-        if (!audio) {
-            return std::unexpected(audio.error());
+        if (auto loaded = read_cached_stem(directory, *stems, stem); !loaded) {
+            return std::unexpected(loaded.error());
         }
-        if (audio->sample_rate != kSampleRate || audio->channels != 2 || audio->frames <= 0) {
-            return std::unexpected("cached " + name + " is not 44100 Hz stereo");
-        }
-        if (stem == 0) {
-            stems->frames = audio->frames;
-        } else if (audio->frames != stems->frames) {
-            return std::unexpected("cached " + name + " length does not match drums");
-        }
-        stems->audio[static_cast<std::size_t>(stem)] = std::move(audio->samples);
     }
     return stems;
+}
+
+bool stem_audio_resident(const Stems& stems, int stem) {
+    if (stem < 0 || stem >= kStemCount || stems.frames <= 0) {
+        return false;
+    }
+    return static_cast<std::int64_t>(stems.audio[static_cast<std::size_t>(stem)].size()) >= stems.frames * 2;
 }
 
 }  // namespace
 
 struct Session::Command {
-    enum class Kind { Open, OpenCache, Close, Relocate, Cancel, Gain, Pan, Mute, Solo, Shutdown };
+    enum class Kind {
+        Open,
+        OpenCache,
+        Close,
+        Relocate,
+        Cancel,
+        Gain,
+        Pan,
+        Mute,
+        Solo,
+        StemResidency,
+        Shutdown
+    };
 
     Kind kind = Kind::Shutdown;
     std::uint64_t job = 0;
@@ -145,6 +153,7 @@ struct Session::Command {
     float gain = 1.f;
     bool flag = false;
     bool refresh = false;
+    std::array<bool, kStemCount> need{};
 };
 
 struct Session::State {
@@ -289,6 +298,12 @@ std::uint64_t Session::set_solo(int stem, bool solo) {
     return revision;
 }
 
+std::uint64_t Session::sync_stem_residency(std::array<bool, kStemCount> need) {
+    const auto revision = issue_revision();
+    enqueue(Command{.kind = Command::Kind::StemResidency, .revision = revision, .need = need});
+    return revision;
+}
+
 std::shared_ptr<const SongSnapshot> Session::snapshot() const {
     std::lock_guard lock(state_->publish_mu);
     return state_->snapshot;
@@ -402,6 +417,46 @@ void Session::apply_mixer(const Command& command) {
     publish(std::move(next));
 }
 
+void Session::run_stem_residency(const Command& command) {
+    state_->revision = command.revision;
+    auto current = snapshot();
+    if (current == nullptr || current->phase != SongPhase::Ready || state_->stems == nullptr ||
+        state_->cache_directory.empty()) {
+        if (current != nullptr) {
+            auto next = std::make_shared<SongSnapshot>(*current);
+            next->revision = state_->revision;
+            publish(std::move(next));
+        }
+        return;
+    }
+
+    auto rebuilt = std::make_shared<Stems>();
+    rebuilt->frames = state_->stems->frames;
+    for (int stem = 0; stem < kStemCount; ++stem) {
+        const auto index = static_cast<std::size_t>(stem);
+        if (!command.need[index]) {
+            continue;
+        }
+        if (stem_audio_resident(*state_->stems, stem)) {
+            rebuilt->audio[index] = state_->stems->audio[index];
+            continue;
+        }
+        if (auto loaded = read_cached_stem(state_->cache_directory, *rebuilt, stem); !loaded) {
+            auto next = std::make_shared<SongSnapshot>(*current);
+            next->revision = state_->revision;
+            next->detail = loaded.error();
+            publish(std::move(next));
+            return;
+        }
+    }
+    state_->stems = std::move(rebuilt);
+    auto next = std::make_shared<SongSnapshot>(*current);
+    next->revision = state_->revision;
+    next->stems = state_->stems;
+    next->detail.clear();
+    publish(std::move(next));
+}
+
 void Session::drain_mixer() {
     for (;;) {
         Command command;
@@ -454,6 +509,9 @@ void Session::thread_main() {
             case Command::Kind::Solo:
                 apply_mixer(command);
                 break;
+            case Command::Kind::StemResidency:
+                run_stem_residency(command);
+                break;
             case Command::Kind::Open:
                 run_open(command);
                 break;
@@ -503,7 +561,7 @@ std::expected<std::shared_ptr<Session::CacheHit>, std::string> Session::load_cac
 }
 
 std::expected<void, std::string> Session::store_cache(
-    const std::filesystem::path& directory, const Stems& stems) const {
+    const std::filesystem::path& directory, Stems& stems, bool release) const {
     const auto temporary = directory.parent_path() / (directory.filename().wstring() + L".tmp");
     std::error_code error;
     std::filesystem::remove_all(temporary, error);
@@ -512,7 +570,8 @@ std::expected<void, std::string> Session::store_cache(
         return std::unexpected("cannot create " + utf8_of(temporary));
     }
     try {
-        if (auto written = write_stems(temporary, stems); !written) {
+        auto written = release ? write_stems_release(temporary, stems) : write_stems(temporary, stems);
+        if (!written) {
             std::filesystem::remove_all(temporary, error);
             return written;
         }
@@ -632,6 +691,8 @@ void Session::run_open(const Command& command) {
         publish(blank(SongPhase::Failed, snapshot()->progress, false, separated.error()));
         return;
     }
+    // Drop decoded mix before cache write — stems alone are enough from here.
+    state_->mix.reset();
 
     // Move the old project aside so a failed write can put it back. store_cache
     // leaves an existing directory untouched, so the slot has to be empty first.
@@ -662,7 +723,8 @@ void Session::run_open(const Command& command) {
             }
         }
     }
-    if (auto stored = store_cache(state_->cache_directory, *separated); !stored) {
+    // Write-and-drop each stem so peak RAM falls during cache I/O; reload for Ready.
+    if (auto stored = store_cache(state_->cache_directory, *separated, true); !stored) {
         if (!restore_displaced()) {
             publish(blank(SongPhase::Failed, 1.f, false, "cannot replace cache"));
             return;
@@ -694,7 +756,12 @@ void Session::run_open(const Command& command) {
         state_->project_hash = committed->hash;
         state_->project_name = committed->name;
     }
-    state_->stems = std::make_shared<const Stems>(std::move(*separated));
+    auto reloaded = read_cached_stems(state_->cache_directory);
+    if (!reloaded) {
+        publish(blank(SongPhase::Failed, 1.f, false, reloaded.error()));
+        return;
+    }
+    state_->stems = std::move(*reloaded);
     state_->mix.reset();
     publish(blank(SongPhase::Ready, 1.f, false, {}));
 }

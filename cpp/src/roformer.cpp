@@ -420,6 +420,10 @@ std::expected<Stems, std::string> separate_roformer(
             }
         }
     }
+    accum.clear();
+    accum.shrink_to_fit();
+    counter.clear();
+    counter.shrink_to_fit();
     return stems;
 }
 

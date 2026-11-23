@@ -11,6 +11,8 @@ struct App;
 enum class LogLevel { Info, Warn, Error };
 
 void monitor_start(const std::filesystem::path& cache_directory);
+// Flush any pending file log lines (also called from draw_monitor).
+void monitor_flush();
 void log_message(LogLevel level, std::string text);
 void log_phrase(LogLevel level, std::string_view key, const std::string& tail = {});
 void log_stem(LogLevel level, int stem, std::string_view key, const std::string& tail = {});

@@ -39,6 +39,7 @@ enum class Icon {
     Magnet,
     Undo,
     Redo,
+    TabUp,
     Count,
 };
 
@@ -374,9 +375,11 @@ private:
     std::vector<Entry> entries_;
 };
 
+float ui_scale();
 void draw(App& app);
 bool interface_locked(const App& app);
 std::optional<std::filesystem::path> pick_audio(HWND__* hwnd);
+std::optional<std::filesystem::path> pick_tab_export(HWND__* hwnd);
 std::vector<char> read_binary(const std::filesystem::path& path);
 
 }  // namespace btapp

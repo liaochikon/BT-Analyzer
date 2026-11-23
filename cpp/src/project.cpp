@@ -408,12 +408,22 @@ void apply_playback_line(ProjectPlayback& playback, std::string_view key, std::s
         playback.beat_division = std::string(raw);
     } else if (key == "grid_division" && known_division(raw)) {
         playback.grid_division = std::string(raw);
+    } else if (key == "rhythm_layout" && (raw == "grid" || raw == "score")) {
+        playback.rhythm_layout = std::string(raw);
     } else if (key == "guitar_pitch_min" || key == "guitar_pitch_max" || key == "bass_pitch_min" ||
-               key == "bass_pitch_max" || key == "key_min" || key == "key_max" || key == "fret_prefer") {
+               key == "bass_pitch_max" || key == "key_min" || key == "key_max" || key == "fret_prefer" ||
+               key == "tab_hand_span" || key == "tab_onset_ms") {
         float value = 0.f;
         if (parse_number(raw, value)) {
             int rounded = static_cast<int>(std::lround(value));
-            const int limit = key == "fret_prefer" ? 24 : 127;
+            int limit = 127;
+            if (key == "fret_prefer") {
+                limit = 24;
+            } else if (key == "tab_hand_span") {
+                limit = 12;
+            } else if (key == "tab_onset_ms") {
+                limit = 200;
+            }
             rounded = std::clamp(rounded, 0, limit);
             if (key == "guitar_pitch_min") {
                 playback.guitar_pitch_min = rounded;
@@ -427,6 +437,10 @@ void apply_playback_line(ProjectPlayback& playback, std::string_view key, std::s
                 playback.key_min = rounded;
             } else if (key == "key_max") {
                 playback.key_max = rounded;
+            } else if (key == "tab_hand_span") {
+                playback.tab_hand_span = std::max(1, rounded);
+            } else if (key == "tab_onset_ms") {
+                playback.tab_onset_ms = rounded;
             } else {
                 playback.fret_prefer = rounded;
             }
@@ -844,6 +858,9 @@ std::expected<void, std::string> write_project_playback(
         output << "fret_allow_open=" << (playback.fret_allow_open ? '1' : '0') << '\n';
         output << "fret_show_alt=" << (playback.fret_show_alt ? '1' : '0') << '\n';
         output << "fret_harmonic=" << (playback.fret_harmonic ? '1' : '0') << '\n';
+        output << "tab_hand_span=" << playback.tab_hand_span << '\n';
+        output << "tab_onset_ms=" << playback.tab_onset_ms << '\n';
+        output << "rhythm_layout=" << (playback.rhythm_layout == "score" ? "score" : "grid") << '\n';
         auto write_verify = [&](const char* key, auto lane_value) {
             output << key << '=';
             for (int index = 0; index < kStemCount; ++index) {

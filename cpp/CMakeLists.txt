@@ -125,7 +125,8 @@ add_library(bt_stem STATIC
   src/note_score.cpp
   src/harmonic_deghost.cpp
   src/beat_track.cpp
-  src/project.cpp)
+  src/project.cpp
+  src/log.cpp)
 target_include_directories(bt_stem PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(bt_stem PRIVATE
   ${DR_DIR}
@@ -141,6 +142,15 @@ endif()
 target_compile_options(bt_stem PRIVATE /W4 /permissive- /utf-8)
 target_link_libraries(bt_stem PUBLIC soxr ${ORT_ROOT}/lib/onnxruntime.lib)
 target_link_libraries(bt_stem PRIVATE bcrypt)
+
+# Headless orchestration for agents / CLI / GUI. Depends only on bt_stem (no ImGui / D3D).
+add_library(bt_core STATIC
+  src/core/engine.cpp
+  src/core/tab.cpp)
+target_include_directories(bt_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_definitions(bt_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(bt_core PRIVATE /W4 /permissive- /utf-8)
+target_link_libraries(bt_core PUBLIC bt_stem)
 
 set(BT_REPO_ROOT ${CMAKE_SOURCE_DIR}/..)
 
@@ -207,60 +217,101 @@ configure_file(
   ${CMAKE_CURRENT_BINARY_DIR}/bt-app.rc
   @ONLY)
 
+set(BT_APP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/apps/bt_app)
+set(BT_APP_INCLUDE_DIRS
+  ${BT_APP_ROOT}
+  ${BT_APP_ROOT}/shell
+  ${BT_APP_ROOT}/input
+  ${BT_APP_ROOT}/views
+  ${BT_APP_ROOT}/domain
+  ${BT_APP_ROOT}/widgets
+  ${BT_APP_ROOT}/state)
+
+set(BT_APP_SOURCES
+  apps/bt_app/shell/main.cpp
+  apps/bt_app/views/ui.cpp
+  apps/bt_app/views/midi_view.cpp
+  apps/bt_app/input/keys.cpp
+  apps/bt_app/input/pointer.cpp
+  apps/bt_app/domain/prefs.cpp
+  apps/bt_app/domain/playback.cpp
+  apps/bt_app/domain/history.cpp
+  apps/bt_app/domain/transport.cpp
+  apps/bt_app/domain/separate.cpp
+  apps/bt_app/domain/notes.cpp
+  apps/bt_app/domain/tab.cpp
+  apps/bt_app/domain/beats.cpp
+  apps/bt_app/domain/monitor.cpp
+  apps/bt_app/widgets/icons.cpp
+  apps/bt_app/widgets/notation.cpp
+  apps/bt_app/widgets/i18n.cpp)
+
 add_executable(bt-app WIN32
-  apps/bt_app/main.cpp
-  apps/bt_app/ui.cpp
-  apps/bt_app/prefs.cpp
-  apps/bt_app/playback.cpp
-  apps/bt_app/history.cpp
-  apps/bt_app/icons.cpp
-  apps/bt_app/i18n.cpp
-  apps/bt_app/transport.cpp
-  apps/bt_app/separate.cpp
-  apps/bt_app/keys.cpp
-  apps/bt_app/midi_view.cpp
-  apps/bt_app/notes.cpp
-  apps/bt_app/beats.cpp
-  apps/bt_app/monitor.cpp
+  ${BT_APP_SOURCES}
   ${CMAKE_CURRENT_BINARY_DIR}/bt-app.rc)
-target_link_libraries(bt-app PRIVATE bt_stem bt_imgui d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi imm32)
+target_include_directories(bt-app PRIVATE ${BT_APP_INCLUDE_DIRS})
+target_link_libraries(bt-app PRIVATE bt_core bt_stem bt_imgui d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi imm32)
 target_compile_definitions(bt-app PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN "BT_VERSION=\"${BT_VERSION}\"")
 target_compile_options(bt-app PRIVATE /W4 /permissive- /utf-8)
 bt_copy_runtime(bt-app)
 bt_copy_assets(bt-app)
 
 if(BT_DEV_TOOLS)
+  add_executable(bt-agent apps/bt_agent/main.cpp)
+  target_link_libraries(bt-agent PRIVATE bt_core bt_stem psapi)
+  target_compile_options(bt-agent PRIVATE /W4 /permissive- /utf-8)
+  bt_copy_runtime(bt-agent)
+
   add_executable(bt_stem_tests
     tests/test_host.cpp
     tests/test_roformer.cpp
     tests/test_session.cpp
     tests/test_player.cpp
     tests/test_notes.cpp
+    tests/test_tab.cpp
     tests/test_note_score.cpp
     tests/test_harmonic_deghost.cpp
     tests/test_beats.cpp
     tests/test_projects.cpp
     tests/test_runtime.cpp
-    apps/bt_app/notes.cpp
-    apps/bt_app/beats.cpp
-    apps/bt_app/monitor.cpp
-    apps/bt_app/i18n.cpp
-    apps/bt_app/transport.cpp
-    apps/bt_app/separate.cpp
-    apps/bt_app/keys.cpp
-    apps/bt_app/ui.cpp
-    apps/bt_app/prefs.cpp
-    apps/bt_app/playback.cpp
-    apps/bt_app/history.cpp
-    apps/bt_app/icons.cpp
-    apps/bt_app/midi_view.cpp)
-  target_include_directories(bt_stem_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/apps/bt_app)
-  target_link_libraries(bt_stem_tests PRIVATE bt_stem bt_imgui Catch2::Catch2WithMain d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi imm32)
+    apps/bt_app/domain/notes.cpp
+    apps/bt_app/domain/tab.cpp
+    apps/bt_app/domain/beats.cpp
+    apps/bt_app/domain/monitor.cpp
+    apps/bt_app/domain/transport.cpp
+    apps/bt_app/domain/separate.cpp
+    apps/bt_app/domain/prefs.cpp
+    apps/bt_app/domain/playback.cpp
+    apps/bt_app/domain/history.cpp
+    apps/bt_app/input/keys.cpp
+    apps/bt_app/input/pointer.cpp
+    apps/bt_app/views/ui.cpp
+    apps/bt_app/views/midi_view.cpp
+    apps/bt_app/widgets/i18n.cpp
+    apps/bt_app/widgets/icons.cpp
+    apps/bt_app/widgets/notation.cpp)
+  target_include_directories(bt_stem_tests PRIVATE ${BT_APP_INCLUDE_DIRS})
+  target_link_libraries(bt_stem_tests PRIVATE bt_core bt_stem bt_imgui Catch2::Catch2WithMain d3d11 dxgi d3dcompiler ole32 uuid shell32 psapi imm32)
   target_compile_definitions(bt_stem_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_compile_options(bt_stem_tests PRIVATE /W4 /permissive- /utf-8)
   bt_copy_runtime(bt_stem_tests)
 
+  # Headless core tests: no ImGui / D3D — safe for agents and CI without a window.
+  add_executable(bt_core_tests
+    tests/test_core_engine.cpp
+    tests/test_core_tab.cpp)
+  target_link_libraries(bt_core_tests PRIVATE bt_core Catch2::Catch2WithMain)
+  target_compile_definitions(bt_core_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(bt_core_tests PRIVATE /W4 /permissive- /utf-8)
+  bt_copy_runtime(bt_core_tests)
+
   include(CTest)
   include(${catch2_SOURCE_DIR}/extras/Catch.cmake)
   catch_discover_tests(bt_stem_tests)
+  catch_discover_tests(bt_core_tests)
+
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(
+    NAME architecture.boundaries
+    COMMAND ${Python3_EXECUTABLE} ${BT_REPO_ROOT}/tools/check_architecture.py)
 endif()

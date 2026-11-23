@@ -8,6 +8,7 @@
 #include "app_state.hpp"
 #include "midi_view.hpp"
 #include "notes.hpp"
+#include "tab.hpp"
 #include "transport.hpp"
 
 #include "imgui.h"
@@ -113,6 +114,12 @@ const char* action_id(Action action) {
         return "midi_duplicate";
     case Action::MidiDelete:
         return "midi_delete";
+    case Action::TabFingering:
+        return "tab_fingering";
+    case Action::TabComboPrev:
+        return "tab_combo_prev";
+    case Action::TabComboNext:
+        return "tab_combo_next";
     case Action::Count:
         break;
     }
@@ -670,22 +677,52 @@ void fire_action(App& app, Action action, bool ready, const bt::Player::Snapshot
         }
         break;
     case Action::PrevTrack:
+        tab_exit_fingering_mode(app);
         app.selected = (app.selected + bt::kStemCount - 1) % bt::kStemCount;
         break;
     case Action::NextTrack:
+        tab_exit_fingering_mode(app);
         app.selected = (app.selected + 1) % bt::kStemCount;
         break;
     case Action::MidiCopy:
-        midi_copy_selection(app);
+        if (app.note_stage == NoteStage::Midi && !app.tab_fingering_mode) {
+            midi_copy_selection(app);
+        }
         break;
     case Action::MidiPaste:
-        midi_begin_paste_preview(app);
+        if (app.note_stage == NoteStage::Midi && !app.tab_fingering_mode) {
+            midi_begin_paste_preview(app);
+        }
         break;
     case Action::MidiDuplicate:
-        midi_duplicate_selection(app);
+        if (app.note_stage == NoteStage::Midi && !app.tab_fingering_mode) {
+            midi_duplicate_selection(app);
+        }
         break;
     case Action::MidiDelete:
-        midi_delete_selection(app);
+        if (app.note_stage == NoteStage::Midi) {
+            midi_delete_selection(app);
+        }
+        break;
+    case Action::TabFingering:
+        if (app.note_stage == NoteStage::Midi) {
+            const int stem = std::clamp(app.selected, 0, bt::kStemCount - 1);
+            if (app.tab_fingering_mode) {
+                tab_exit_fingering_mode(app);
+            } else {
+                tab_enter_fingering_mode(app, stem);
+            }
+        }
+        break;
+    case Action::TabComboPrev:
+        if (app.note_stage == NoteStage::Midi) {
+            tab_cycle_combo(app, std::clamp(app.selected, 0, bt::kStemCount - 1), -1);
+        }
+        break;
+    case Action::TabComboNext:
+        if (app.note_stage == NoteStage::Midi) {
+            tab_cycle_combo(app, std::clamp(app.selected, 0, bt::kStemCount - 1), 1);
+        }
         break;
     default:
         break;
@@ -710,6 +747,9 @@ ActionScope action_scope(Action action) {
     case Action::MidiPaste:
     case Action::MidiDuplicate:
     case Action::MidiDelete:
+    case Action::TabFingering:
+    case Action::TabComboPrev:
+    case Action::TabComboNext:
         return ActionScope::Midi;
     default:
         return ActionScope::Player;
@@ -828,6 +868,15 @@ const char* action_label(Action action, int language) {
     case Action::MidiDelete:
         key = "action.midi_delete";
         break;
+    case Action::TabFingering:
+        key = "action.tab_fingering";
+        break;
+    case Action::TabComboPrev:
+        key = "action.tab_combo_prev";
+        break;
+    case Action::TabComboNext:
+        key = "action.tab_combo_next";
+        break;
     case Action::Count:
         break;
     }
@@ -870,6 +919,9 @@ Keymap default_keymap() {
     set(Action::MidiPaste, make_chord(ImGuiKey_V, false, true));
     set(Action::MidiDuplicate, make_chord(ImGuiKey_D, false, true));
     set(Action::MidiDelete, make_chord(ImGuiKey_Delete), make_chord(ImGuiKey_Backspace));
+    set(Action::TabFingering, make_chord(ImGuiKey_F));
+    set(Action::TabComboPrev, make_chord(ImGuiKey_LeftBracket));
+    set(Action::TabComboNext, make_chord(ImGuiKey_RightBracket), make_chord(ImGuiKey_Tab));
     return map;
 }
 
@@ -1043,7 +1095,8 @@ void draw_shortcut_hints(App& app) {
         Action::AdjustTrackGain, Action::AdjustTrackPan,
     };
     const Action midi_order[] = {
-        Action::MidiCopy, Action::MidiPaste, Action::MidiDuplicate, Action::MidiDelete,
+        Action::MidiCopy, Action::MidiPaste, Action::MidiDuplicate, Action::MidiDelete, Action::TabFingering,
+        Action::TabComboPrev, Action::TabComboNext,
     };
 
     if (app.hover_region == HoverRegion::Projects || app.hover_region == HoverRegion::Player) {
@@ -1078,9 +1131,10 @@ void draw_shortcut_hints(App& app) {
             midi_rows.emplace_back(t("hint.right_drag"), t("hint.midi_erase"));
             midi_rows.emplace_back(t("hint.left_empty"), t("hint.midi_place"));
             midi_rows.emplace_back(t("hint.left_note"), t("hint.midi_edit"));
-        } else if (app.note_stage == NoteStage::View && app.midi_view == MidiView::Fall) {
-            midi_rows.emplace_back(t("hint.left_drag"), t("hint.fall_scrub"));
-            midi_rows.emplace_back(t("hint.right_drag"), t("hint.fall_loop"));
+            if (app.midi_view == MidiView::Fall) {
+                midi_rows.emplace_back(t("hint.left_drag"), t("hint.fall_scrub"));
+                midi_rows.emplace_back(t("hint.right_drag"), t("hint.fall_loop"));
+            }
         }
         draw_hint_panel(app.hover_midi, midi_rows);
     }
@@ -1116,7 +1170,8 @@ void draw_keymap_settings(App& app) {
         Action::Solo,
     };
     const Action midi_order[] = {
-        Action::MidiCopy, Action::MidiPaste, Action::MidiDuplicate, Action::MidiDelete,
+        Action::MidiCopy, Action::MidiPaste, Action::MidiDuplicate, Action::MidiDelete, Action::TabFingering,
+        Action::TabComboPrev, Action::TabComboNext,
     };
 
     auto draw_group = [&](const char* heading, const Action* order, std::size_t count) {
@@ -1276,7 +1331,30 @@ void draw_keymap_settings(App& app) {
     }
 }
 
+namespace {
+
+// Mode-local keys that are not part of the remappable keymap. Runs before Action matching.
+bool handle_mode_keys(App& app) {
+    if (app.note_stage != NoteStage::Midi) {
+        return false;
+    }
+    // Order matters: paste owns Esc/Enter while active; then fingering; then TAB score caret.
+    if (midi_handle_paste_keys(app)) {
+        return true;
+    }
+    if (handle_tab_fingering_keys(app)) {
+        return true;
+    }
+    if (handle_tab_score_keys(app)) {
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
 void handle_actions(App& app, bool ready) {
+    // --- 1) gates ---
     if (app.keymap_capture >= 0 || ime_owns_keyboard(app) || ImGui::GetIO().WantTextInput) {
         clear_seq_runtime();
         return;
@@ -1290,7 +1368,14 @@ void handle_actions(App& app, bool ready) {
         return;
     }
 
+    // --- 2) mode-local ---
     const auto transport = app.player->snapshot();
+    if (handle_mode_keys(app)) {
+        clear_seq_runtime();
+        return;
+    }
+
+    // --- 3) keymap Actions ---
     const auto& map = app.keymap;
     const auto layer_down = [&](Action action) {
         return layer_held(map.bindings[static_cast<std::size_t>(action)]) ||

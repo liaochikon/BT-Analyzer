@@ -331,10 +331,11 @@ std::expected<void, std::string> save_notes(const std::filesystem::path& path, c
         if (!output) {
             return std::unexpected("cannot write notes cache");
         }
-        output << "bt-notes 1\n";
+        output << "bt-notes 3\n";
         output << std::setprecision(17);
         for (const Note& note : notes) {
-            output << note.pitch << ' ' << note.start << ' ' << note.end << ' ' << note.velocity << '\n';
+            output << note.pitch << ' ' << note.start << ' ' << note.end << ' ' << note.velocity << ' '
+                   << note.string << ' ' << note.fret << ' ' << (note.on_tab ? 1 : 0) << '\n';
         }
         if (!output) {
             std::filesystem::remove(temporary, error);
@@ -360,12 +361,34 @@ std::expected<std::vector<Note>, std::string> load_notes(const std::filesystem::
     }
     std::string header;
     std::getline(input, header);
-    if (header != "bt-notes 1") {
+    const int version = header == "bt-notes 1"   ? 1
+                        : header == "bt-notes 2" ? 2
+                        : header == "bt-notes 3" ? 3
+                                                 : 0;
+    if (version == 0) {
         return std::unexpected("unrecognized notes cache");
     }
     std::vector<Note> notes;
     Note note;
     while (input >> note.pitch >> note.start >> note.end >> note.velocity) {
+        note.string = -1;
+        note.fret = -1;
+        note.on_tab = false;
+        if (version >= 2) {
+            if (!(input >> note.string >> note.fret)) {
+                break;
+            }
+        }
+        if (version >= 3) {
+            int flag = 0;
+            if (!(input >> flag)) {
+                break;
+            }
+            note.on_tab = flag != 0;
+        } else if (version == 2 && note.string >= 0 && note.fret >= 0) {
+            // Preserve previously fingered notes on TAB when upgrading caches.
+            note.on_tab = true;
+        }
         notes.push_back(note);
     }
     return notes;

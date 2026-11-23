@@ -210,6 +210,10 @@ std::expected<Stems, std::string> separate_audio(
             }
         }
     }
+    accum.clear();
+    accum.shrink_to_fit();
+    sum_weight.clear();
+    sum_weight.shrink_to_fit();
     return stems;
 }
 
@@ -232,6 +236,53 @@ std::expected<void, std::string> write_stems(const std::filesystem::path& direct
             return written;
         }
     }
+    return {};
+}
+
+std::expected<void, std::string> write_stems_release(const std::filesystem::path& directory, Stems& stems) {
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) {
+        std::string name = "path";
+        try {
+            const std::u8string utf8 = directory.u8string();
+            name.assign(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+        } catch (const std::exception&) {
+        }
+        return std::unexpected("cannot create " + name);
+    }
+    for (int stem = 0; stem < kStemCount; ++stem) {
+        const auto index = static_cast<std::size_t>(stem);
+        const auto path = directory / (std::string(kStemNames[index]) + ".wav");
+        auto written = write_pcm16_wav(path, stems.audio[index].data(), 2, stems.frames);
+        if (!written) {
+            return written;
+        }
+        stems.audio[index].clear();
+        stems.audio[index].shrink_to_fit();
+    }
+    return {};
+}
+
+std::expected<void, std::string> read_cached_stem(
+    const std::filesystem::path& directory, Stems& stems, int stem) {
+    if (stem < 0 || stem >= kStemCount) {
+        return std::unexpected("stem out of range");
+    }
+    const auto name = std::string(kStemNames[static_cast<std::size_t>(stem)]);
+    auto audio = read_float_wav(directory / (name + ".wav"));
+    if (!audio) {
+        return std::unexpected(audio.error());
+    }
+    if (audio->sample_rate != kSampleRate || audio->channels != 2 || audio->frames <= 0) {
+        return std::unexpected("cached " + name + " is not 44100 Hz stereo");
+    }
+    if (stems.frames == 0) {
+        stems.frames = audio->frames;
+    } else if (audio->frames != stems.frames) {
+        return std::unexpected("cached " + name + " length does not match");
+    }
+    stems.audio[static_cast<std::size_t>(stem)] = std::move(audio->samples);
     return {};
 }
 

@@ -2,10 +2,14 @@
 
 #include "bt/basic_pitch.hpp"
 #include "bt/beat_track.hpp"
+#include "bt/core/grid.hpp"
+#include "bt/core/types.hpp"
+#include "bt/core/engine.hpp"
 #include "bt/player.hpp"
 #include "bt/project.hpp"
 #include "bt/session.hpp"
 #include "keys.hpp"
+#include "pointer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -31,9 +35,16 @@ struct Peak {
     float high = 0.f;
 };
 
-enum class MidiView { Guitar, Bass, Fall };
+enum class MidiView { Tab, Guitar, Bass, Fall };
 
-enum class NoteStage { View, Midi, Tab };
+// View = not in the MIDI/TAB editor; Midi = dual-view editor (TAB strip + roll/fall/fret).
+enum class NoteStage { View, Midi };
+
+using TabDuration = bt::core::TabDuration;
+using TabBeat = bt::core::TabBeat;
+using TabMeasure = bt::core::TabMeasure;
+using TabScore = bt::core::TabScore;
+inline constexpr int kTabDurationCount = bt::core::kTabDurationCount;
 
 // Which main pane the mouse is over. Used for context shortcut hints.
 enum class HoverRegion { None, Projects, Midi, Mixer, Player };
@@ -53,46 +64,17 @@ using ProjectItem = bt::ProjectEntry;
 
 enum class NoteStatus { Idle, Running, Ready, Failed };
 
-// Division of the beat pulse. Bar is four beats, Beat is the detected pulse, and the
-// rest divide that pulse. The metronome and the grid each pick their own.
-enum class BeatDivision { Bar = 0, Beat = 1, Half = 2, Triplet = 3, Quarter = 4 };
-
-inline const char* division_token(BeatDivision division) {
-    switch (division) {
-    case BeatDivision::Bar:
-        return "bar";
-    case BeatDivision::Half:
-        return "half";
-    case BeatDivision::Triplet:
-        return "triplet";
-    case BeatDivision::Quarter:
-        return "quarter";
-    case BeatDivision::Beat:
-        return "beat";
-    }
-    return "beat";
-}
-
-inline BeatDivision division_from_token(std::string_view token) {
-    if (token == "bar") {
-        return BeatDivision::Bar;
-    }
-    if (token == "half") {
-        return BeatDivision::Half;
-    }
-    if (token == "triplet") {
-        return BeatDivision::Triplet;
-    }
-    if (token == "quarter") {
-        return BeatDivision::Quarter;
-    }
-    return BeatDivision::Beat;
-}
-
-enum class GridMark { Bar, Beat, Sub };
+using BeatDivision = bt::core::BeatDivision;
+using GridMark = bt::core::GridMark;
+using bt::core::division_from_token;
+using bt::core::division_parts;
+using bt::core::division_step;
+using bt::core::division_token;
+using bt::core::each_bpm_tick;
+using bt::core::each_grid_tick;
 
 // The fretboard is always 24 frets. Note brightness on the board uses a fixed full scale.
-inline constexpr int kFretCount = 24;
+inline constexpr int kFretCount = bt::core::kFretCount;
 inline constexpr int kFretBright = 100;
 
 // One undoable change to the open project. Each step keeps both sides, so undo applies
@@ -128,6 +110,8 @@ class StemEngine;
 
 struct App {
     bt::Session* session = nullptr;
+    // Same notes storage as session when wired — GUI edits and headless Engine ops share one array.
+    bt::core::Engine* core = nullptr;
     bt::Player* player = nullptr;
     HWND__* hwnd = nullptr;
     std::filesystem::path cache_directory;
@@ -142,7 +126,12 @@ struct App {
     StemEngine* engine = nullptr;
     std::shared_ptr<const bt::Stems> loaded;
     std::shared_ptr<const bt::Audio> peaks_source;
-    std::shared_ptr<const bt::Stems> peak_stems;
+    // Dirty keys for peak rebuild — avoid holding stems shared_ptr (pins all audio in RAM).
+    std::uint64_t peaks_job = 0;
+    std::uintptr_t peaks_stems_id = 0;
+    // Last stem-residency mask pushed to Session (bit i set ⇒ stem i kept in RAM).
+    std::uint64_t stem_residency_mask = ~0ull;
+    std::uint64_t stem_residency_job = 0;
     std::vector<Peak> peaks;
     float peak_scale = 1.f;
     std::array<std::vector<Peak>, bt::kStemCount> stem_peaks{};
@@ -180,8 +169,32 @@ struct App {
     int beat_flash_level = 1;
     std::uint64_t seen_revision = 0;
     int selected = 4;
-    MidiView midi_view = MidiView::Guitar;
-    NoteStage note_stage = NoteStage::View;
+    MidiView midi_view = MidiView::Tab;
+    NoteStage note_stage = NoteStage::Midi;
+    // Dual-view: TAB strip height as fraction of Midi edit canvas (above piano roll).
+    float tab_pane_ratio = 0.28f;
+    // TAB fingering options.
+    int tab_hand_span = 4;   // max frets a single hand shape may cover
+    int tab_onset_ms = 2;    // notes within this window share one onset group
+    // Fingering-only mode: selection locked; cycle playable string/fret combos per onset.
+    bool tab_fingering_mode = false;
+    std::vector<int> tab_mode_notes;  // note indices in selected stem
+    int tab_focus_group = 0;
+    int tab_combo_index = 0;
+    // Which MIDI dual-view pane last claimed pointer focus (shortcuts / erase).
+    PaneFocus pane_focus = PaneFocus::Roll;
+    // Rhythm tree per stem (Score layout). TAB group edits can write MIDI starts/ends.
+    std::array<TabScore, bt::kStemCount> tab_scores{};
+    // TAB group drag onto existing rhythm slots (Score mode).
+    bool tab_group_dragging = false;
+    std::vector<int> tab_drag_notes;
+    int tab_drag_measure = -1;
+    int tab_drag_beat = -1;
+    TabDuration tab_duration = TabDuration::Quarter;
+    bool tab_duration_dotted = false;
+    int tab_score_measure = 0;
+    int tab_score_beat = 0;
+    int tab_score_string = 0;
     // Piano roll viewport. Vertical span is a whole number of octaves.
     double roll_time = 0;
     double roll_seconds = 16;
@@ -195,12 +208,14 @@ struct App {
     float roll_grab_y = 0.f;
     double roll_grab_time = 0;
     int roll_grab_bottom = 48;
+    // Locked at middle-pan start so TAB + piano roll (different grid_w) stay in sync.
+    float roll_pan_sec_per_px = 0.f;
+    float roll_pan_row_h = 0.f;
     int roll_note = -1;
     int roll_note_pitch = 0;
     double roll_note_start = 0;
     double roll_note_end = 0;
-    // 0 move, 1 resize start, 2 resize end, 3 place.
-    int roll_edit = 0;
+    RollEdit roll_edit = RollEdit::Move;
     bool roll_erase = false;
     // Piano-roll selection. Parallel to notes[roll_stem] when non-empty; cleared on stem change.
     std::vector<char> roll_selected;
@@ -216,6 +231,9 @@ struct App {
     std::vector<MidiNote> roll_clipboard;
     // True while paste preview follows the mouse; left click / Enter commits, Esc / right cancels.
     bool roll_paste = false;
+    // Last paste-preview anchor (updated while drawing the roll); Enter commits via this.
+    double roll_paste_time = 0;
+    int roll_paste_pitch = 60;
     // Undo and redo for the open project. Cleared when the user opens or closes a project.
     std::vector<ProjectStep> project_undo;
     std::vector<ProjectStep> project_redo;
@@ -275,8 +293,8 @@ struct App {
     ScreenRect hover_player{};
     int language = 0;
     bool language_loaded = false;
-    int wave_drag = -1;
-    int loop_drag = -1;
+    DragKind wave_drag = DragKind::None;
+    DragKind loop_drag = DragKind::None;
     bool loop_is_a = true;
     bool loop_paint = false;
     bool loop_snap = false;
@@ -341,53 +359,6 @@ void each_metro_beat(const App& app, double from, double to, Fn&& visit) {
     }
 }
 
-inline int division_parts(BeatDivision division) {
-    switch (division) {
-    case BeatDivision::Half:
-        return 2;
-    case BeatDivision::Triplet:
-        return 3;
-    case BeatDivision::Quarter:
-        return 4;
-    case BeatDivision::Bar:
-    case BeatDivision::Beat:
-        return 1;
-    }
-    return 1;
-}
-
-inline double division_step(double beat, BeatDivision division) {
-    switch (division) {
-    case BeatDivision::Bar:
-        return beat * 4.0;
-    case BeatDivision::Half:
-        return beat / 2.0;
-    case BeatDivision::Triplet:
-        return beat / 3.0;
-    case BeatDivision::Quarter:
-        return beat / 4.0;
-    case BeatDivision::Beat:
-        return beat;
-    }
-    return beat;
-}
-
-inline double beat_gap(const std::vector<double>& times, std::size_t index) {
-    if (index + 1 < times.size()) {
-        const double gap = times[index + 1] - times[index];
-        if (gap > 1e-6) {
-            return gap;
-        }
-    }
-    if (index > 0) {
-        const double gap = times[index] - times[index - 1];
-        if (gap > 1e-6) {
-            return gap;
-        }
-    }
-    return 0.5;
-}
-
 inline double minimum_gap(const std::vector<double>& times, double from, double to) {
     if (times.size() < 2) {
         return 0;
@@ -410,92 +381,6 @@ inline double minimum_gap(const std::vector<double>& times, double from, double 
         }
     }
     return any ? gap : 0;
-}
-
-// Walk the beat lattice. Bar is every fourth beat. Finer divisions split the gap to the next beat.
-template <class Fn>
-void each_grid_tick(const std::vector<double>& times, BeatDivision division, double from, double to, Fn&& visit) {
-    if (!(to > from) || times.empty()) {
-        return;
-    }
-    const int parts = division_parts(division);
-    const bool bars_only = division == BeatDivision::Bar;
-    auto cursor = std::lower_bound(times.begin(), times.end(), from - 1e-4);
-    std::size_t index = static_cast<std::size_t>(cursor - times.begin());
-    if (index > 0) {
-        --index;
-    }
-    const double limit = to - 1e-9;
-    for (; index < times.size(); ++index) {
-        const double beat = times[index];
-        if (beat >= limit) {
-            break;
-        }
-        const double gap = beat_gap(times, index);
-        const bool bar = index % 4 == 0;
-        if (beat >= from - 1e-4) {
-            if (bars_only) {
-                if (bar) {
-                    visit(beat, GridMark::Bar);
-                }
-            } else {
-                visit(beat, bar ? GridMark::Bar : GridMark::Beat);
-            }
-        }
-        if (!bars_only && parts > 1) {
-            const double next = index + 1 < times.size() ? times[index + 1] : beat + gap;
-            for (int part = 1; part < parts; ++part) {
-                const double tick = beat + gap * static_cast<double>(part) / static_cast<double>(parts);
-                if (tick >= next - 1e-6) {
-                    break;
-                }
-                if (tick >= from - 1e-4 && tick < limit) {
-                    visit(tick, GridMark::Sub);
-                }
-            }
-        }
-    }
-}
-
-template <class Fn>
-void each_bpm_tick(double bpm, double offset, BeatDivision division, double from, double to, Fn&& visit) {
-    if (!(to > from)) {
-        return;
-    }
-    const double beat = bpm > 1.0 ? 60.0 / bpm : 0.5;
-    const int parts = division_parts(division);
-    const double step = division == BeatDivision::Bar ? beat * 4.0 : beat / static_cast<double>(std::max(1, parts));
-    if (!(step > 1e-6)) {
-        return;
-    }
-    const double phase = std::fmod(std::max(0.0, offset), step);
-    long long index = static_cast<long long>(std::ceil((from - phase - 1e-6) / step));
-    if (index < 0) {
-        index = 0;
-    }
-    const double limit = to - 1e-9;
-    for (int guard = 0; guard < 100000; ++guard, ++index) {
-        const double time = phase + static_cast<double>(index) * step;
-        if (time >= limit) {
-            break;
-        }
-        if (time < from - 1e-4) {
-            continue;
-        }
-        if (division == BeatDivision::Bar) {
-            visit(time, GridMark::Bar);
-            continue;
-        }
-        const double beat_pos = (time - offset) / beat;
-        const double nearest = std::round(beat_pos);
-        if (std::abs(beat_pos - nearest) >= 1e-3) {
-            visit(time, GridMark::Sub);
-            continue;
-        }
-        const auto beat_index = static_cast<long long>(std::llround(nearest));
-        const int wrapped = static_cast<int>(beat_index % 4);
-        visit(time, (wrapped < 0 ? wrapped + 4 : wrapped) == 0 ? GridMark::Bar : GridMark::Beat);
-    }
 }
 
 inline double snap_grid_time(const App& app, double time, bool snap) {

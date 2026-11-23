@@ -1,5 +1,6 @@
 #include "history.hpp"
 
+#include "monitor.hpp"
 #include "notes.hpp"
 #include "playback.hpp"
 
@@ -31,7 +32,7 @@ void discard(const ProjectStep& step) {
 
 // Mouse, keyboard focus, and drags are all idle. Playback values recorded now do not split a drag.
 bool project_idle(const App& app) {
-    return !app.note_gesture && app.loop_drag < 0 && app.wave_drag < 0 && !ImGui::IsAnyItemActive();
+    return !app.note_gesture && !drag_active(app.loop_drag) && !drag_active(app.wave_drag) && !ImGui::IsAnyItemActive();
 }
 
 // Swaps the open folder with the held folder. Both sit in the model folder, so the swap goes
@@ -209,7 +210,7 @@ void record_project_playback(App& app) {
 }
 
 bool project_history_blocked(const App& app) {
-    if (app.note_gesture || app.loop_drag >= 0 || app.wave_drag >= 0 || ImGui::IsAnyItemActive()) {
+    if (app.note_gesture || drag_active(app.loop_drag) || drag_active(app.wave_drag) || ImGui::IsAnyItemActive()) {
         return true;
     }
     if (app.separation_job != 0) {
@@ -264,6 +265,7 @@ void undo_project(App& app) {
         return;
     }
     app.project_redo.push_back(std::move(step));
+    log_phrase(LogLevel::Info, "log.undo");
 }
 
 void redo_project(App& app) {
@@ -280,6 +282,7 @@ void redo_project(App& app) {
         return;
     }
     app.project_undo.push_back(std::move(step));
+    log_phrase(LogLevel::Info, "log.redo");
 }
 
 }  // namespace btapp

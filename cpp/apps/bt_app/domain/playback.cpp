@@ -3,7 +3,9 @@
 #include "bt/project.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <system_error>
 
 namespace btapp {
@@ -32,7 +34,8 @@ bool same_project_playback(const bt::ProjectPlayback& left, const bt::ProjectPla
            left.bass_pitch_min == right.bass_pitch_min && left.bass_pitch_max == right.bass_pitch_max &&
            left.key_min == right.key_min && left.key_max == right.key_max && left.fret_prefer == right.fret_prefer &&
            left.fret_suggest == right.fret_suggest && left.fret_allow_open == right.fret_allow_open &&
-           left.fret_show_alt == right.fret_show_alt && left.fret_harmonic == right.fret_harmonic;
+           left.fret_show_alt == right.fret_show_alt && left.fret_harmonic == right.fret_harmonic &&
+           left.tab_hand_span == right.tab_hand_span && left.tab_onset_ms == right.tab_onset_ms;
 }
 
 bt::ProjectPlayback capture_project_playback(const App& app) {
@@ -65,6 +68,8 @@ bt::ProjectPlayback capture_project_playback(const App& app) {
     playback.fret_allow_open = app.fret_allow_open;
     playback.fret_show_alt = app.fret_show_alt;
     playback.fret_harmonic = app.fret_harmonic;
+    playback.tab_hand_span = app.tab_hand_span;
+    playback.tab_onset_ms = app.tab_onset_ms;
     if (app.playback_loop_pending) {
         playback.loop = app.playback_loop_on;
         playback.loop_a = app.playback_loop_a;
@@ -115,6 +120,8 @@ void apply_project_playback(App& app, const bt::ProjectPlayback& playback) {
     app.fret_allow_open = playback.fret_allow_open;
     app.fret_show_alt = playback.fret_show_alt;
     app.fret_harmonic = playback.fret_harmonic;
+    app.tab_hand_span = std::clamp(playback.tab_hand_span, 1, 12);
+    app.tab_onset_ms = std::clamp(playback.tab_onset_ms, 0, 200);
     for (int stem = 0; stem < bt::kStemCount; ++stem) {
         const auto index = static_cast<std::size_t>(stem);
         float gain = playback.gain[index];
@@ -226,6 +233,8 @@ void sync_project_playback(App& app, const bt::SongSnapshot& song) {
         app.playback_job = song.job;
         app.playback_directory = song.cache_directory;
         app.playback_loop_pending = false;
+        app.stem_residency_job = 0;
+        app.stem_residency_mask = ~0ull;
         if (song.job == 0 || song.cache_directory.empty()) {
             apply_project_playback(app, bt::default_project_playback());
             return;
@@ -244,6 +253,93 @@ void sync_project_playback(App& app, const bt::SongSnapshot& song) {
     bt::read_project_playback(song.cache_directory, playback);
     apply_project_playback(app, playback);
     app.playback_bound = true;
+}
+
+namespace {
+
+bool stem_audible_mix(const App& app, int stem) {
+    bool any_solo = false;
+    for (bool solo : app.solo) {
+        any_solo = any_solo || solo;
+    }
+    return !app.mute[static_cast<std::size_t>(stem)] &&
+           (!any_solo || app.solo[static_cast<std::size_t>(stem)]);
+}
+
+bool stem_audio_present(const bt::Stems& stems, int stem) {
+    if (stem < 0 || stem >= bt::kStemCount || stems.frames <= 0) {
+        return false;
+    }
+    return static_cast<std::int64_t>(stems.audio[static_cast<std::size_t>(stem)].size()) >= stems.frames * 2;
+}
+
+std::array<bool, bt::kStemCount> residency_need(const App& app) {
+    std::array<bool, bt::kStemCount> need{};
+    for (int stem = 0; stem < bt::kStemCount; ++stem) {
+        const auto index = static_cast<std::size_t>(stem);
+        if (stem == app.selected || stem_audible_mix(app, stem)) {
+            need[index] = true;
+            continue;
+        }
+        const NoteStatus status = app.note_status[index];
+        if (status == NoteStatus::Running || status == NoteStatus::Idle) {
+            need[index] = true;
+        }
+    }
+    return need;
+}
+
+std::uint64_t residency_mask_bits(const std::array<bool, bt::kStemCount>& need) {
+    std::uint64_t mask = 0;
+    for (int stem = 0; stem < bt::kStemCount; ++stem) {
+        if (need[static_cast<std::size_t>(stem)]) {
+            mask |= (1ull << stem);
+        }
+    }
+    return mask;
+}
+
+}  // namespace
+
+void sync_stem_residency(App& app, const bt::SongSnapshot& song) {
+    if (app.session == nullptr || song.phase != bt::SongPhase::Ready || song.stems == nullptr ||
+        song.cache_directory.empty()) {
+        return;
+    }
+    const auto need = residency_need(app);
+    const std::uint64_t mask = residency_mask_bits(need);
+    if (song.job == app.stem_residency_job && mask == app.stem_residency_mask) {
+        return;
+    }
+    app.stem_residency_job = song.job;
+    app.stem_residency_mask = mask;
+    app.session->sync_stem_residency(need);
+}
+
+std::shared_ptr<const bt::SongSnapshot> ensure_stem_resident(App& app, int stem) {
+    if (app.session == nullptr || stem < 0 || stem >= bt::kStemCount) {
+        return nullptr;
+    }
+    auto song = app.session->snapshot();
+    if (song == nullptr || song->phase != bt::SongPhase::Ready || song->stems == nullptr ||
+        song->cache_directory.empty()) {
+        return song;
+    }
+    if (stem_audio_present(*song->stems, stem)) {
+        return song;
+    }
+    auto need = residency_need(app);
+    need[static_cast<std::size_t>(stem)] = true;
+    for (int other = 0; other < bt::kStemCount; ++other) {
+        if (stem_audio_present(*song->stems, other)) {
+            need[static_cast<std::size_t>(other)] = true;
+        }
+    }
+    const auto revision = app.session->sync_stem_residency(need);
+    app.stem_residency_job = song->job;
+    app.stem_residency_mask = residency_mask_bits(need);
+    app.session->wait_for_revision(revision, std::chrono::seconds(60));
+    return app.session->snapshot();
 }
 
 }  // namespace btapp

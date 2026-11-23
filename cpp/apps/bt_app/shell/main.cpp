@@ -2,11 +2,14 @@
 
 #include "i18n.hpp"
 #include "icons.hpp"
+#include "notation.hpp"
 #include "history.hpp"
+#include "monitor.hpp"
 #include "playback.hpp"
 #include "prefs.hpp"
 
 #include "bt/basic_pitch.hpp"
+#include "bt/core/engine.hpp"
 #include "bt/project.hpp"
 #include "notes.hpp"
 #include "beats.hpp"
@@ -373,23 +376,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     gfx.width = static_cast<UINT>(client.right - client.left);
     gfx.height = static_cast<UINT>(client.bottom - client.top);
 
-    bt::SessionOptions options;
-    options.cache_directory = saves_directory;
-    options.model_key = engine->model_key();
-    options.backend_key = [eng = engine.get()] { return eng->model_key(); };
-    options.backend_device = [eng = engine.get()] { return eng->device(); };
-    options.separate_mix = [eng = engine.get()](
-                               const bt::Audio& audio, const std::function<void(float)>& progress,
-                               const std::function<bool()>& cancelled) -> std::expected<bt::Stems, std::string> {
-        return eng->separate(audio, progress, cancelled);
-    };
-    auto session_created = bt::Session::create(std::move(options));
-    if (!session_created) {
+    bt::core::EngineOptions core_options;
+    core_options.session.cache_directory = saves_directory;
+    core_options.session.model_key = engine->model_key();
+    core_options.session.backend_key = [eng = engine.get()] { return eng->model_key(); };
+    core_options.session.backend_device = [eng = engine.get()] { return eng->device(); };
+    core_options.session.separate_mix = [eng = engine.get()](
+                                            const bt::Audio& audio, const std::function<void(float)>& progress,
+                                            const std::function<bool()>& cancelled)
+        -> std::expected<bt::Stems, std::string> { return eng->separate(audio, progress, cancelled); };
+    if (!pitch_path.empty()) {
+        core_options.pitch_model = pitch_path;
+    }
+    auto core_created = bt::core::Engine::create(std::move(core_options));
+    if (!core_created) {
         const std::wstring session_error = btapp::tw("error.session");
         MessageBoxW(nullptr, session_error.c_str(), title.c_str(), MB_ICONERROR);
         return 1;
     }
-    auto session = std::move(*session_created);
+    auto core = std::move(*core_created);
     bt::Player player;
     if (auto started = player.start_device(); !started) {
         // The window still opens. Playback controls report the device failure.
@@ -423,20 +428,77 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
             }
         }
     }
+    // UI icons as font glyphs (fonts/bt-icons.ttf, PUA U+E000..).
+    {
+        const auto icon_font_path = locate_asset(exe_dir, cwd, "fonts/bt-icons.ttf");
+        if (!icon_font_path.empty()) {
+            auto bytes = btapp::read_binary(icon_font_path);
+            if (!bytes.empty()) {
+                void* owned = ImGui::MemAlloc(bytes.size());
+                std::memcpy(owned, bytes.data(), bytes.size());
+                ImFontConfig config;
+                config.OversampleH = 2;
+                config.OversampleV = 2;
+                config.PixelSnapH = false;
+                static const ImWchar kIconRanges[] = {
+                    btapp::kIconGlyphBase,
+                    static_cast<ImWchar>(btapp::kIconGlyphBase + btapp::kIconCount - 1),
+                    0,
+                };
+                ImFont* icon_font =
+                    io.Fonts->AddFontFromMemoryTTF(owned, static_cast<int>(bytes.size()), 32.f, &config, kIconRanges);
+                if (icon_font == nullptr) {
+                    ImGui::MemFree(owned);
+                } else {
+                    btapp::set_icon_font(icon_font);
+                }
+            }
+        }
+    }
+    // TAB notation symbols (Bravura SMuFL as TrueType — see tools/bravura_otf_to_ttf.py).
+    {
+        const auto notation_path = locate_asset(exe_dir, cwd, "fonts/Bravura.ttf");
+        if (!notation_path.empty()) {
+            auto bytes = btapp::read_binary(notation_path);
+            if (!bytes.empty()) {
+                void* owned = ImGui::MemAlloc(bytes.size());
+                std::memcpy(owned, bytes.data(), bytes.size());
+                ImFontConfig config;
+                config.OversampleH = 2;
+                config.OversampleV = 2;
+                config.PixelSnapH = false;
+                static const ImWchar kSmuflRanges[] = {
+                    0xE06D, 0xE06E,  // tab clefs
+                    0xE0A0, 0xE0DF,  // noteheads
+                    0xE1E7, 0xE1E7,  // augmentationDot
+                    0xE220, 0xE22F,  // tremolo
+                    0xE240, 0xE24F,  // flags
+                    0xE4E0, 0xE4EF,  // rests
+                    0xE830, 0xE84F,  // guitar
+                    0xEAA0, 0xEABF,  // vibrato / trill wiggles
+                    0,
+                };
+                ImFont* notation =
+                    io.Fonts->AddFontFromMemoryTTF(owned, static_cast<int>(bytes.size()), 48.f, &config, kSmuflRanges);
+                if (notation == nullptr) {
+                    ImGui::MemFree(owned);
+                } else {
+                    btapp::set_notation_font(notation);
+                }
+            }
+        }
+    }
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(gfx.device, gfx.context);
     gfx.imgui_ready = true;
     apply_dpi(gfx);
-    {
-        const auto atlas_png = locate_asset(exe_dir, cwd, "assets/icons/atlas.png");
-        if (!atlas_png.empty()) {
-            btapp::load_icon_atlas(gfx.device, atlas_png);
-        }
-    }
 
     btapp::App app;
-    app.session = session.get();
+    app.core = core.get();
+    app.session = &core->session();
+    // One notes array for GUI edits and Engine quantize/TAB/agent-style ops.
+    core->share_notes(&app.notes);
     app.player = &player;
     app.hwnd = reinterpret_cast<HWND__*>(hwnd);
     app.cache_directory = cache_directory;
@@ -469,7 +531,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
 
     const auto song = startup_song(command_line);
     if (!song.empty()) {
-        session->open_song(song);
+        core->import_audio(song);
     }
 
     bool running = true;
@@ -493,9 +555,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     }
 
     btapp::flush_project_playback(app);
+    btapp::monitor_flush();
     // Undo steps end with the app. Held folders from separation reruns are removed here.
     btapp::reset_project_timeline(app);
-    btapp::unload_icon_atlas();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

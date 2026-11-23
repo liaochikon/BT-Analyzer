@@ -145,7 +145,8 @@ TEST_CASE("session reuses a cache entry for the same file bytes") {
     auto expected = bt::separate_audio(*loaded, identity, config);
     REQUIRE(expected.has_value());
     REQUIRE(first->stems->frames == expected->frames);
-    REQUIRE(first->stems->audio[4] == expected->audio[4]);
+    // Ready path write-releases then reloads PCM16 wavs — compare within quantization.
+    require_near_pcm(first->stems->audio[4], expected->audio[4]);
 
     const auto second = require_settled(*session, session->open_song(song));
     REQUIRE(second->phase == bt::SongPhase::Ready);
@@ -320,6 +321,46 @@ TEST_CASE("session reports a missing file and keeps mixer changes") {
     REQUIRE(mixed->solo[1]);
     REQUIRE(mixed->pan[4] == -0.5f);
     REQUIRE(mixed->stems == ready->stems);
+}
+
+TEST_CASE("session stem residency unloads muted stems and reloads on demand") {
+    TempDir temp("bt-stem-residency");
+    auto created = bt::Session::create(options_with(temp.path / "cache", identity));
+    REQUIRE(created.has_value());
+    auto session = std::move(*created);
+
+    const auto song = temp.path / "song.wav";
+    const auto audio = ramp(128, 1.f);
+    REQUIRE(bt::write_float_wav(song, audio.samples.data(), 2, audio.frames).has_value());
+    const auto ready = require_settled(*session, session->open_song(song));
+    REQUIRE(ready->phase == bt::SongPhase::Ready);
+    REQUIRE(ready->stems != nullptr);
+    for (int stem = 0; stem < bt::kStemCount; ++stem) {
+        REQUIRE(
+            static_cast<std::int64_t>(ready->stems->audio[static_cast<std::size_t>(stem)].size()) >=
+            ready->stems->frames * 2);
+    }
+
+    std::array<bool, bt::kStemCount> need{};
+    need[4] = true;  // keep guitar only
+    const auto thin = session->sync_stem_residency(need);
+    REQUIRE(session->wait_for_revision(thin, std::chrono::seconds(5)));
+    const auto thinned = session->snapshot();
+    REQUIRE(thinned->stems != nullptr);
+    REQUIRE(static_cast<std::int64_t>(thinned->stems->audio[4].size()) >= thinned->stems->frames * 2);
+    for (int stem = 0; stem < bt::kStemCount; ++stem) {
+        if (stem == 4) {
+            continue;
+        }
+        REQUIRE(thinned->stems->audio[static_cast<std::size_t>(stem)].empty());
+    }
+
+    need[0] = true;  // reload drums
+    const auto expand = session->sync_stem_residency(need);
+    REQUIRE(session->wait_for_revision(expand, std::chrono::seconds(5)));
+    const auto expanded = session->snapshot();
+    REQUIRE(static_cast<std::int64_t>(expanded->stems->audio[0].size()) >= expanded->stems->frames * 2);
+    REQUIRE(static_cast<std::int64_t>(expanded->stems->audio[4].size()) >= expanded->stems->frames * 2);
 }
 
 TEST_CASE("wav write keeps a filename outside the system code page") {

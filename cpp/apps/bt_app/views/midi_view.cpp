@@ -2,24 +2,18 @@
 
 #include "i18n.hpp"
 #include "notes.hpp"
+#include "tab.hpp"
+#include "pointer.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
+#include <vector>
 
 namespace btapp {
 namespace {
 
-constexpr int kFallDrag = 8;
-constexpr int kRollNoteDrag = 10;
-constexpr int kRollOverviewDrag = 11;
-constexpr int kRollPanDrag = 12;
-constexpr int kRollSeekDrag = 13;
-constexpr int kRollBoxDrag = 14;
-constexpr int kEditMove = 0;
-constexpr int kEditStart = 1;
-constexpr int kEditEnd = 2;
-constexpr int kEditPlace = 3;
 constexpr int kHandSpan = 4;
 constexpr double kFallLook = 4.0;
 constexpr float kOutOfRangeNoteAlpha = 0.22f;
@@ -83,6 +77,142 @@ void text_at(ImDrawList* draw, ImVec2 top_left, float size, ImU32 color, const c
 
 ImVec2 text_size(float size, const char* text) {
     return ImGui::GetFont()->CalcTextSizeA(size, 10000.f, 0.f, text);
+}
+
+// Shared MIDI+TAB horizontal axis: Grid = seconds; Score = rhythm-tree beat columns.
+struct ScoreAxisSlot {
+    int measure = 0;
+    int beat = 0;
+    float x0 = 0.f;
+    float x1 = 0.f;
+    double time = 0;
+    double quarters = 0;
+    bool rest = false;
+    bool bar_start = false;
+    std::vector<int> note_indices;
+};
+
+struct ScoreAxis {
+    bool active = false;
+    float left = 0.f;
+    float right = 0.f;
+    double t0 = 0;
+    double span = 1;
+    std::vector<ScoreAxisSlot> slots;
+
+    float x_of_time(double time) const {
+        // Always map by absolute seconds so TAB stays locked to the piano-roll time axis.
+        return left + static_cast<float>((time - t0) / std::max(1e-6, span)) * (right - left);
+    }
+
+    float x_of_note(int /*note_index*/, double time) const {
+        // TAB digits/groups always sit on the MIDI onset. Rhythm-slot membership only
+        // drives snap coloring / drop targets — never shifts the drawn X (that caused 串位).
+        return x_of_time(time);
+    }
+
+    bool slot_for_note(int note_index, double time, ScoreAxisSlot& out) const {
+        if (active) {
+            for (const ScoreAxisSlot& slot : slots) {
+                if (std::find(slot.note_indices.begin(), slot.note_indices.end(), note_index) !=
+                    slot.note_indices.end()) {
+                    out = slot;
+                    return true;
+                }
+            }
+            if (!slots.empty()) {
+                int best = 0;
+                double best_d = std::abs(slots[0].time - time);
+                for (int i = 1; i < static_cast<int>(slots.size()); ++i) {
+                    const double d = std::abs(slots[static_cast<std::size_t>(i)].time - time);
+                    if (d < best_d) {
+                        best_d = d;
+                        best = i;
+                    }
+                }
+                out = slots[static_cast<std::size_t>(best)];
+                return true;
+            }
+        }
+        return false;
+    }
+
+    double time_at_x(float x) const {
+        // Continuous absolute time — same mapping as the piano roll (slot hits use nearest beat separately).
+        return t0 + static_cast<double>((x - left) / std::max(1.f, right - left)) * span;
+    }
+};
+
+ScoreAxis make_score_axis(App& app, int stem, float left, float right, double t0, double span, bool use_score) {
+    ScoreAxis axis;
+    axis.left = left;
+    axis.right = right;
+    axis.t0 = t0;
+    axis.span = std::max(0.25, span);
+    // MIDI piano roll stays on the beat grid; only TAB uses the rhythm-tree axis.
+    if (!use_score) {
+        return axis;
+    }
+    tab_score_ensure_layout(app, stem);
+    const TabScore& score = app.tab_scores[static_cast<std::size_t>(stem)];
+    if (tab_score_empty(score)) {
+        return axis;
+    }
+    // Place slots on the same absolute time axis as the piano roll (not proportional
+    // packing of only-visible beats — that drifts at scroll edges).
+    double beat_sec = app.bpm > 1.f ? 60.0 / static_cast<double>(app.bpm) : 0.5;
+    if (app.beat_times != nullptr && app.beat_times->size() >= 2) {
+        double sum = 0;
+        int count = 0;
+        for (std::size_t i = 0; i + 1 < app.beat_times->size() && count < 32; ++i) {
+            const double gap = (*app.beat_times)[i + 1] - (*app.beat_times)[i];
+            if (gap > 1e-3) {
+                sum += gap;
+                ++count;
+            }
+        }
+        if (count > 0) {
+            beat_sec = sum / static_cast<double>(count);
+        }
+    }
+    beat_sec = std::max(1e-3, beat_sec);
+    const double t1 = t0 + axis.span;
+    const float width = std::max(1.f, right - left);
+    auto x_at = [&](double time) {
+        return left + static_cast<float>((time - t0) / axis.span) * width;
+    };
+    std::vector<ScoreAxisSlot> visible;
+    for (int m = 0; m < static_cast<int>(score.measures.size()); ++m) {
+        const TabMeasure& measure = score.measures[static_cast<std::size_t>(m)];
+        for (int b = 0; b < static_cast<int>(measure.beats.size()); ++b) {
+            const TabBeat& beat = measure.beats[static_cast<std::size_t>(b)];
+            const double quarters = std::max(1e-6, tab_duration_quarters(beat.duration, beat.dotted));
+            const double beat_end = beat.time + quarters * beat_sec;
+            if (beat_end < t0 - 1e-3 || beat.time > t1 + 1e-3) {
+                continue;
+            }
+            ScoreAxisSlot slot;
+            slot.measure = m;
+            slot.beat = b;
+            slot.time = beat.time;
+            slot.quarters = quarters;
+            slot.rest = beat.rest;
+            slot.bar_start = b == 0;
+            slot.note_indices = beat.note_indices;
+            slot.x0 = std::clamp(x_at(beat.time), left, right);
+            slot.x1 = std::clamp(x_at(beat_end), left, right);
+            if (slot.x1 < slot.x0 + 2.f) {
+                slot.x1 = std::min(right, slot.x0 + 2.f);
+            }
+            visible.push_back(std::move(slot));
+        }
+    }
+    if (visible.empty()) {
+        return axis;
+    }
+    axis.slots = std::move(visible);
+    axis.active = true;
+    return axis;
 }
 
 int key_span(const App& app, int& lo, int& hi) {
@@ -521,7 +651,9 @@ void draw_piano_key(ImDrawList* draw, const PianoKey& key, float scale, float fo
     draw->PopClipRect();
 }
 
-void draw_fall(App& app, ImDrawList* draw, ImVec2 origin, ImVec2 size, int stem, double position, double length, bool ready) {
+void draw_fall(
+    App& app, ImDrawList* draw, ImVec2 origin, ImVec2 size, int stem, double position, double length, bool ready,
+    bool canvas_hot) {
     const float scale = ui_scale();
     const bt::Player::Snapshot transport = app.player != nullptr ? app.player->snapshot() : bt::Player::Snapshot{};
     const float keyboard_h = std::min(72.f * scale, size.y * 0.28f);
@@ -612,19 +744,19 @@ void draw_fall(App& app, ImDrawList* draw, ImVec2 origin, ImVec2 size, int stem,
     if (!ready || !(length > 0)) {
         return;
     }
-    const bool hovered = ImGui::IsItemHovered();
+    const bool hovered = canvas_hot;
     auto time_at = [&](float mouse_y) {
         const float y = std::clamp(mouse_y - origin.y, 0.f, lane_h);
         return std::clamp(position + (1.0 - static_cast<double>(y / lane_h)) * kFallLook, 0.0, length);
     };
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        app.wave_drag = kFallDrag;
-        app.loop_drag = -1;
+        app.wave_drag = DragKind::Fall;
+        app.loop_drag = DragKind::None;
         app.midi_drag_y = ImGui::GetIO().MousePos.y;
     }
-    if (app.wave_drag == kFallDrag) {
+    if (app.wave_drag == DragKind::Fall) {
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            app.wave_drag = -1;
+            app.wave_drag = DragKind::None;
         } else {
             // Phone-style: content follows the finger (drag down → seek forward).
             const float mouse_y = ImGui::GetIO().MousePos.y;
@@ -640,13 +772,13 @@ void draw_fall(App& app, ImDrawList* draw, ImVec2 origin, ImVec2 size, int stem,
         if (edit_loop_begin(
                 app, transport, time_at(ImGui::GetIO().MousePos.y), length, ImGui::GetIO().MousePos.y, y_of(std::max(0.0, transport.loop_a)),
                 y_of(std::max(0.0, transport.loop_b)), 36.f * scale)) {
-            app.loop_drag = kFallDrag;
-            app.wave_drag = -1;
+            app.loop_drag = DragKind::Fall;
+            app.wave_drag = DragKind::None;
         }
     }
-    if (app.loop_drag == kFallDrag) {
+    if (app.loop_drag == DragKind::Fall) {
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-            app.loop_drag = -1;
+            app.loop_drag = DragKind::None;
         } else {
             edit_loop_drag(app, time_at(ImGui::GetIO().MousePos.y), length);
         }
@@ -689,6 +821,38 @@ void fit_roll(App& app, int stem, double length) {
     clamp_roll(app, length);
 }
 
+// Shared by TAB strip + piano roll so dual-view only resets/fits once per stem change.
+void sync_roll_viewport(App& app, int stem, double length) {
+    if (app.roll_song != app.note_song || app.roll_stem != stem) {
+        if (app.note_gesture && app.roll_song == app.note_song) {
+            finish_note_gesture(app, app.note_gesture_stem);
+        } else {
+            app.note_gesture = false;
+            app.note_gesture_before.clear();
+        }
+        if (app.wave_drag == DragKind::RollNote || app.wave_drag == DragKind::RollOverview || app.wave_drag == DragKind::RollPan ||
+            app.wave_drag == DragKind::RollSeek || app.wave_drag == DragKind::RollBox || app.wave_drag == DragKind::TabGroup ||
+            app.roll_erase) {
+            cancel_pointer_gestures(app);
+        } else {
+            app.roll_paste = false;
+        }
+        app.roll_selected.clear();
+    }
+    const bool has_notes = !app.notes[static_cast<std::size_t>(stem)].empty();
+    const bool song_changed = app.roll_song != app.note_song || app.roll_stem != stem;
+    const bool notes_arrived = has_notes && !app.roll_seen_notes;
+    const bool length_arrived = length > 0.25 && app.roll_fit_length <= 0.25;
+    if (song_changed || notes_arrived || length_arrived) {
+        fit_roll(app, stem, length);
+        app.roll_song = app.note_song;
+        app.roll_stem = stem;
+        app.roll_seen_notes = has_notes;
+        app.roll_fit_length = length;
+    }
+    clamp_roll(app, length);
+}
+
 int roll_note_at(
     const std::vector<MidiNote>& notes, int bottom, int semis, double t0, double span, ImVec2 grid_min, ImVec2 grid_max, float row_h, float scale,
     ImVec2 mouse) {
@@ -717,6 +881,45 @@ double snap_roll_time(const App& app, double time, bool snap) {
     return snap_grid_time(app, time, snap);
 }
 
+int clipboard_origin_pitch(const App& app) {
+    int pitch = 60;
+    double start = 0;
+    bool any = false;
+    for (const MidiNote& note : app.roll_clipboard) {
+        if (!any || note.start < start) {
+            start = note.start;
+            pitch = note.pitch;
+            any = true;
+        }
+    }
+    return pitch;
+}
+
+void build_paste_notes(const App& app, double anchor_time, int anchor_pitch, double length, std::vector<MidiNote>& out) {
+    out.clear();
+    if (app.roll_clipboard.empty()) {
+        return;
+    }
+    const int origin_pitch = clipboard_origin_pitch(app);
+    out.reserve(app.roll_clipboard.size());
+    for (const MidiNote& clip : app.roll_clipboard) {
+        MidiNote note = clip;
+        note.start = anchor_time + clip.start;
+        note.end = anchor_time + clip.end;
+        note.pitch = std::clamp(anchor_pitch + (clip.pitch - origin_pitch), 0, 127);
+        if (length > 0) {
+            note.start = std::clamp(note.start, 0.0, length);
+            note.end = std::clamp(note.end, 0.0, length);
+        } else {
+            note.start = std::max(0.0, note.start);
+            note.end = std::max(note.start + 0.01, note.end);
+        }
+        if (note.end > note.start) {
+            out.push_back(note);
+        }
+    }
+}
+
 void draw_roll_grid_line(ImDrawList* draw, float x, float y0, float y1, GridMark mark, float scale) {
     ImU32 color = IM_COL32(255, 255, 255, 14);
     float thick = 1.f;
@@ -729,25 +932,25 @@ void draw_roll_grid_line(ImDrawList* draw, float x, float y0, float y1, GridMark
     draw->AddLine(ImVec2(x, y0), ImVec2(x, y1), color, thick);
 }
 
-int roll_note_edge(const MidiNote& note, double t0, double span, ImVec2 grid_min, float grid_w, float scale, ImVec2 mouse) {
+RollEdit roll_note_edge(const MidiNote& note, double t0, double span, ImVec2 grid_min, float grid_w, float scale, ImVec2 mouse) {
     const float x1 = grid_min.x + static_cast<float>((note.start - t0) / span) * grid_w;
     const float x2 = grid_min.x + static_cast<float>((std::max(note.end, note.start) - t0) / span) * grid_w;
     const float handle = std::max(6.f * scale, 5.f);
     if (x2 - x1 < handle * 3.f) {
-        return kEditMove;
+        return RollEdit::Move;
     }
     if (mouse.x <= x1 + handle) {
-        return kEditStart;
+        return RollEdit::Start;
     }
     if (mouse.x >= x2 - handle) {
-        return kEditEnd;
+        return RollEdit::End;
     }
-    return kEditMove;
+    return RollEdit::Move;
 }
 
 void draw_piano_roll(
     App& app, ImDrawList* draw, ImVec2 origin, ImVec2 size, int stem, const bt::Player::Snapshot& transport, double position, double length,
-    bool ready) {
+    bool ready, bool canvas_hot) {
     const float scale = ui_scale();
     const float key_w = std::min(56.f * scale, std::max(36.f * scale, size.x * 0.14f));
     const float ruler_h = std::min(22.f * scale, std::max(16.f * scale, size.y * 0.08f));
@@ -759,42 +962,18 @@ void draw_piano_roll(
     const float grid_w = std::max(1.f, grid_max.x - grid_min.x);
     const float grid_h = std::max(1.f, grid_max.y - grid_min.y);
 
-    if (app.roll_song != app.note_song || app.roll_stem != stem) {
-        if (app.note_gesture && app.roll_song == app.note_song) {
-            finish_note_gesture(app, app.note_gesture_stem);
-        } else {
-            app.note_gesture = false;
-            app.note_gesture_before.clear();
-        }
-        if (app.wave_drag == kRollNoteDrag || app.wave_drag == kRollOverviewDrag || app.wave_drag == kRollPanDrag ||
-            app.wave_drag == kRollSeekDrag || app.wave_drag == kRollBoxDrag || app.roll_erase) {
-            app.wave_drag = -1;
-            app.roll_note = -1;
-            app.roll_erase = false;
-            app.roll_drag_group.clear();
-        }
-        app.roll_selected.clear();
-        app.roll_paste = false;
-    }
-    const bool has_notes = !app.notes[static_cast<std::size_t>(stem)].empty();
-    const bool song_changed = app.roll_song != app.note_song || app.roll_stem != stem;
-    const bool notes_arrived = has_notes && !app.roll_seen_notes;
-    const bool length_arrived = length > 0.25 && app.roll_fit_length <= 0.25;
-    if (song_changed || notes_arrived || length_arrived) {
-        fit_roll(app, stem, length);
-        app.roll_song = app.note_song;
-        app.roll_stem = stem;
-        app.roll_seen_notes = has_notes;
-        app.roll_fit_length = length;
-    }
-    clamp_roll(app, length);
+    sync_roll_viewport(app, stem, length);
 
     const int bottom = app.roll_bottom;
     const int semis = std::max(1, app.roll_semitones);
     const double t0 = app.roll_time;
     const double span = std::max(0.25, app.roll_seconds);
     const float row_h = grid_h / static_cast<float>(semis);
+    const ScoreAxis score_axis = make_score_axis(app, stem, grid_min.x, grid_max.x, t0, span, false);
     auto x_of = [&](double time) {
+        if (score_axis.active) {
+            return score_axis.x_of_time(time);
+        }
         return grid_min.x + static_cast<float>((time - t0) / span) * grid_w;
     };
     auto y_of = [&](int pitch) {
@@ -863,7 +1042,18 @@ void draw_piano_roll(
         }
         draw_roll_grid_line(draw, x_of(mark), grid_min.y, grid_max.y, kind, scale);
     };
-    if (app.grid) {
+    if (score_axis.active) {
+        for (const ScoreAxisSlot& slot : score_axis.slots) {
+            const ImU32 ink = slot.bar_start ? IM_COL32(210, 210, 214, 220) : IM_COL32(70, 70, 74, 200);
+            draw->AddLine(
+                ImVec2(slot.x0, grid_min.y), ImVec2(slot.x0, grid_max.y), ink,
+                slot.bar_start ? std::max(1.5f, 1.5f * scale) : std::max(1.f, scale));
+            if (slot.rest) {
+                draw->AddRectFilled(
+                    ImVec2(slot.x0, grid_min.y), ImVec2(slot.x1, grid_max.y), IM_COL32(40, 40, 44, 40));
+            }
+        }
+    } else if (app.grid) {
         if (have_beats) {
             each_grid_tick(*app.beat_times, app.grid_division, t0, t0 + span, paint_tick);
         } else {
@@ -880,8 +1070,21 @@ void draw_piano_roll(
         if (note.pitch < bottom || note.pitch >= bottom + semis || note.end < t0 || note.start > t0 + span) {
             continue;
         }
-        const float x1 = std::max(grid_min.x, x_of(note.start));
-        const float x2 = std::min(grid_max.x, x_of(std::max(note.end, note.start)));
+        float x1 = 0.f;
+        float x2 = 0.f;
+        if (score_axis.active) {
+            ScoreAxisSlot slot;
+            if (score_axis.slot_for_note(static_cast<int>(note_i), note.start, slot)) {
+                x1 = slot.x0 + 1.f * scale;
+                x2 = slot.x1 - 1.f * scale;
+            } else {
+                x1 = x_of(note.start);
+                x2 = x1 + 8.f * scale;
+            }
+        } else {
+            x1 = std::max(grid_min.x, x_of(note.start));
+            x2 = std::min(grid_max.x, x_of(std::max(note.end, note.start)));
+        }
         const float y = y_of(note.pitch);
         const float pad = std::min(2.f * scale, row_h * 0.16f);
         const bool sounding = note.start <= position && position < note.end;
@@ -951,7 +1154,8 @@ void draw_piano_roll(
     draw->AddRectFilled(ImVec2(view_x1, view_y1), ImVec2(view_x2, view_y2), IM_COL32(242, 242, 242, 36));
     draw->AddRect(ImVec2(view_x1, view_y1), ImVec2(view_x2, view_y2), IM_COL32(242, 242, 242, 210), 0.f, 0, std::max(1.f, scale));
 
-    const bool hovered = ImGui::IsItemHovered();
+    // Pane geometry owns the hit; canvas_hot comes from the shared midi-view button.
+    const bool hovered = canvas_hot;
     ImGuiIO& io = ImGui::GetIO();
     const ImVec2 mouse = io.MousePos;
     const bool on_keys = mouse.x >= origin.x && mouse.x < grid_min.x && mouse.y >= grid_min.y && mouse.y < grid_max.y;
@@ -963,6 +1167,9 @@ void draw_piano_roll(
     auto& stem_notes = app.notes[static_cast<std::size_t>(stem)];
     const bool use_snap = !io.KeyCtrl;
     auto time_at = [&](float x) {
+        if (score_axis.active) {
+            return std::max(0.0, score_axis.time_at_x(x));
+        }
         return std::max(0.0, t0 + static_cast<double>((x - grid_min.x) / grid_w) * span);
     };
     auto pitch_at = [&](float y) {
@@ -1010,91 +1217,35 @@ void draw_piano_roll(
         }
         app.roll_selected.assign(stem_notes.size(), 0);
     };
-    auto clipboard_origin_pitch = [&]() {
-        int pitch = 60;
-        double start = 0;
-        bool any = false;
-        for (const MidiNote& note : app.roll_clipboard) {
-            if (!any || note.start < start) {
-                start = note.start;
-                pitch = note.pitch;
-                any = true;
-            }
-        }
-        return pitch;
-    };
-    auto build_paste_notes = [&](double anchor_time, int anchor_pitch, std::vector<MidiNote>& out) {
-        out.clear();
-        if (app.roll_clipboard.empty()) {
-            return;
-        }
-        const int origin_pitch = clipboard_origin_pitch();
-        out.reserve(app.roll_clipboard.size());
-        for (const MidiNote& clip : app.roll_clipboard) {
-            MidiNote note = clip;
-            note.start = anchor_time + clip.start;
-            note.end = anchor_time + clip.end;
-            note.pitch = std::clamp(anchor_pitch + (clip.pitch - origin_pitch), 0, 127);
-            if (length > 0) {
-                note.start = std::clamp(note.start, 0.0, length);
-                note.end = std::clamp(note.end, 0.0, length);
-            } else {
-                note.start = std::max(0.0, note.start);
-                note.end = std::max(note.start + 0.01, note.end);
-            }
-            if (note.end > note.start) {
-                out.push_back(note);
-            }
-        }
-    };
     auto paste_anchor = [&](double& anchor_time, int& anchor_pitch) {
         const float x = std::clamp(mouse.x, grid_min.x, grid_max.x);
         const float y = std::clamp(mouse.y, grid_min.y, grid_max.y - 0.001f);
         anchor_time = snap_roll_time(app, time_at(x), use_snap);
         anchor_pitch = pitch_at(y);
+        app.roll_paste_time = anchor_time;
+        app.roll_paste_pitch = anchor_pitch;
     };
     auto commit_paste = [&] {
-        if (app.roll_clipboard.empty()) {
-            app.roll_paste = false;
-            return;
-        }
-        double anchor_time = 0;
-        int anchor_pitch = 60;
-        paste_anchor(anchor_time, anchor_pitch);
-        std::vector<MidiNote> placed;
-        build_paste_notes(anchor_time, anchor_pitch, placed);
-        if (placed.empty()) {
-            app.roll_paste = false;
-            return;
-        }
-        begin_note_gesture(app, stem);
-        const int first = static_cast<int>(stem_notes.size());
-        stem_notes.insert(stem_notes.end(), placed.begin(), placed.end());
-        clear_selection();
-        app.roll_selected.assign(stem_notes.size(), 0);
-        for (int index = first; index < static_cast<int>(stem_notes.size()); ++index) {
-            app.roll_selected[static_cast<std::size_t>(index)] = 1;
-        }
-        finish_note_gesture(app, stem);
-        app.roll_paste = false;
+        paste_anchor(app.roll_paste_time, app.roll_paste_pitch);
+        midi_commit_paste_preview(app);
     };
 
-    if (app.wave_drag == kRollNoteDrag) {
+    if (roll_note_dragging(app.wave_drag)) {
         if (app.roll_note >= 0 && app.roll_note < static_cast<int>(stem_notes.size())) {
             MidiNote& note = stem_notes[static_cast<std::size_t>(app.roll_note)];
             const bool nudged = std::fabs(mouse.x - app.roll_grab_x) > 2.f || std::fabs(mouse.y - app.roll_grab_y) > 2.f;
-            if (app.roll_edit == kEditPlace) {
+            if (app.roll_edit == RollEdit::Place) {
                 note.pitch = pitch_at(mouse.y);
                 note.end = std::max(note.start + min_length(note.start), snap_roll_time(app, time_at(mouse.x), use_snap));
             } else if (!nudged) {
                 note.pitch = app.roll_note_pitch;
                 note.start = app.roll_note_start;
                 note.end = app.roll_note_end;
-            } else if (app.roll_edit == kEditEnd) {
+            } else if (app.roll_edit == RollEdit::End) {
                 note.pitch = app.roll_note_pitch;
                 note.start = app.roll_note_start;
                 note.end = std::max(note.start + min_length(note.start), snap_roll_time(app, time_at(mouse.x), use_snap));
-            } else if (app.roll_edit == kEditStart) {
+            } else if (app.roll_edit == RollEdit::Start) {
                 const double limit = app.roll_note_end - min_length(app.roll_note_start);
                 note.pitch = app.roll_note_pitch;
                 note.end = app.roll_note_end;
@@ -1124,12 +1275,15 @@ void draw_piano_roll(
             }
         }
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            if (!tab_score_empty(app.tab_scores[static_cast<std::size_t>(stem)])) {
+                tab_score_sync_from_midi(app, stem);
+            }
             finish_note_gesture(app, stem);
-            app.wave_drag = -1;
+            app.wave_drag = DragKind::None;
             app.roll_note = -1;
             app.roll_drag_group.clear();
         }
-    } else if (app.wave_drag == kRollBoxDrag) {
+    } else if (app.wave_drag == DragKind::RollBox && pane_is_roll(app.pane_focus)) {
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             const float x0 = std::min(app.roll_grab_x, mouse.x);
             const float x1 = std::max(app.roll_grab_x, mouse.x);
@@ -1155,9 +1309,9 @@ void draw_piano_roll(
                     app.roll_selected[static_cast<std::size_t>(hit)] = 1;
                 }
             }
-            app.wave_drag = -1;
+            app.wave_drag = DragKind::None;
         }
-    } else if (app.wave_drag == kRollOverviewDrag) {
+    } else if (app.wave_drag == DragKind::RollOverview) {
         const float dx = mouse.x - app.roll_grab_x;
         const float dy = mouse.y - app.roll_grab_y;
         app.roll_time = app.roll_grab_time + static_cast<double>(dx) / static_cast<double>(overview_w) * song;
@@ -1165,68 +1319,111 @@ void draw_piano_roll(
             app.roll_grab_bottom - static_cast<int>(std::lround(static_cast<double>(dy) / static_cast<double>(overview_h) * 128.0));
         clamp_roll(app, length);
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            app.wave_drag = -1;
+            app.wave_drag = DragKind::None;
         }
     }
 
-    if (app.wave_drag == kRollPanDrag) {
+    if (app.wave_drag == DragKind::RollPan) {
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
-            app.wave_drag = -1;
+            app.wave_drag = DragKind::None;
         } else {
-            // Phone-style: content follows the pointer (drag right → earlier time, drag down → higher pitch).
+            // Phone-style: content follows the pointer. Scale is locked at press (see roll_pan_*).
             const float dx = mouse.x - app.roll_grab_x;
             const float dy = mouse.y - app.roll_grab_y;
-            app.roll_time = app.roll_grab_time - static_cast<double>(dx / grid_w) * span;
-            app.roll_bottom = app.roll_grab_bottom + static_cast<int>(std::lround(static_cast<double>(dy / row_h)));
+            app.roll_time = app.roll_grab_time - static_cast<double>(dx) * static_cast<double>(app.roll_pan_sec_per_px);
+            if (app.roll_pan_row_h > 0.1f) {
+                app.roll_bottom =
+                    app.roll_grab_bottom + static_cast<int>(std::floor(static_cast<double>(dy / app.roll_pan_row_h)));
+            }
             clamp_roll(app, length);
         }
-    } else if (app.wave_drag == kRollSeekDrag) {
+    } else if (app.wave_drag == DragKind::RollSeek) {
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            app.wave_drag = -1;
+            app.wave_drag = DragKind::None;
         } else if (ready && length > 0) {
             app.player->seek(std::clamp(time_at(mouse.x), 0.0, length));
         }
     }
-    if (hovered && app.wave_drag < 0 && !app.roll_erase && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
-        app.wave_drag = kRollPanDrag;
-        app.roll_grab_x = mouse.x;
-        app.roll_grab_y = mouse.y;
+    // Start only on this pane's geometry — dual-view shares canvas_hot across TAB + roll.
+    if ((on_grid || on_overview || on_ruler) && app.wave_drag == DragKind::None && !app.roll_erase &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+        if (app.tab_fingering_mode) {
+            tab_exit_fingering_mode(app);
+            clear_selection();
+        }
+        app.wave_drag = DragKind::RollPan;
+        const ImVec2 press = io.MouseClickedPos[ImGuiMouseButton_Middle];
+        app.roll_grab_x = press.x;
+        app.roll_grab_y = press.y;
         app.roll_grab_time = app.roll_time;
         app.roll_grab_bottom = app.roll_bottom;
+        app.roll_pan_sec_per_px = static_cast<float>(span) / grid_w;
+        app.roll_pan_row_h = row_h;
     }
-    if (!app.roll_paste && hovered && app.wave_drag < 0 && ready && length > 0 && on_ruler &&
+    if (!app.roll_paste && hovered && app.wave_drag == DragKind::None && ready && length > 0 && on_ruler &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        app.wave_drag = kRollSeekDrag;
+        if (app.tab_fingering_mode) {
+            tab_exit_fingering_mode(app);
+            clear_selection();
+        }
+        app.wave_drag = DragKind::RollSeek;
         app.player->seek(std::clamp(time_at(mouse.x), 0.0, length));
     }
 
+    if (app.tab_fingering_mode) {
+        // Keep the highlighted set visible on the roll; any click here dismisses highlight.
+        app.roll_paste = false;
+        app.roll_selected.assign(stem_notes.size(), 0);
+        for (int index : app.tab_mode_notes) {
+            if (index >= 0 && index < static_cast<int>(app.roll_selected.size())) {
+                app.roll_selected[static_cast<std::size_t>(index)] = 1;
+            }
+        }
+        if (roll_note_dragging(app.wave_drag)) {
+            if (app.note_gesture) {
+                finish_note_gesture(app, stem);
+            }
+            app.wave_drag = DragKind::None;
+            app.roll_note = -1;
+            app.roll_drag_group.clear();
+        }
+        const bool click_elsewhere =
+            hovered && app.wave_drag == DragKind::None &&
+            (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) &&
+            (on_grid || on_keys || on_viewport || on_overview || on_ruler);
+        if (click_elsewhere) {
+            tab_exit_fingering_mode(app);
+            clear_selection();
+        }
+    }
+    // Paste Esc/Enter go through handle_actions → midi_handle_paste_keys; mouse stays here.
     if (app.roll_paste) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
-            (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))) {
-            app.roll_paste = false;
-        } else if ((hovered && on_grid && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) ||
-                   ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            midi_cancel_paste(app);
+        } else if (hovered && on_grid && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             commit_paste();
         }
-    } else if (hovered && app.wave_drag < 0 && !app.roll_erase && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    } else if (hovered && app.wave_drag == DragKind::None && !app.roll_erase && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         if (on_grid && io.KeyShift) {
-            app.wave_drag = kRollBoxDrag;
+            app.pane_focus = PaneFocus::Roll;
+            app.wave_drag = DragKind::RollBox;
             app.roll_grab_x = mouse.x;
             app.roll_grab_y = mouse.y;
         } else if (on_viewport) {
-            app.wave_drag = kRollOverviewDrag;
+            app.wave_drag = DragKind::RollOverview;
             app.roll_grab_x = mouse.x;
             app.roll_grab_y = mouse.y;
             app.roll_grab_time = app.roll_time;
             app.roll_grab_bottom = app.roll_bottom;
         } else if (on_grid) {
+            app.pane_focus = PaneFocus::Roll;
             const int hit = roll_note_at(stem_notes, bottom, semis, t0, span, grid_min, grid_max, row_h, scale, mouse);
             if (hit >= 0) {
                 if (!note_selected(hit)) {
                     select_only(hit);
                 }
                 begin_note_gesture(app, stem);
-                app.wave_drag = kRollNoteDrag;
+                app.wave_drag = DragKind::RollNote;
                 app.roll_note = hit;
                 app.roll_note_pitch = stem_notes[static_cast<std::size_t>(hit)].pitch;
                 app.roll_note_start = stem_notes[static_cast<std::size_t>(hit)].start;
@@ -1234,7 +1431,7 @@ void draw_piano_roll(
                 app.roll_edit = roll_note_edge(stem_notes[static_cast<std::size_t>(hit)], t0, span, grid_min, grid_w, scale, mouse);
                 app.roll_grab_x = mouse.x;
                 app.roll_grab_y = mouse.y;
-                if (app.roll_edit == kEditMove) {
+                if (app.roll_edit == RollEdit::Move) {
                     capture_drag_group(hit);
                 } else {
                     app.roll_drag_group.clear();
@@ -1251,9 +1448,9 @@ void draw_piano_roll(
                 stem_notes.push_back(created);
                 app.roll_selected.assign(stem_notes.size(), 0);
                 app.roll_selected.back() = 1;
-                app.wave_drag = kRollNoteDrag;
+                app.wave_drag = DragKind::RollNote;
                 app.roll_note = static_cast<int>(stem_notes.size()) - 1;
-                app.roll_edit = kEditPlace;
+                app.roll_edit = RollEdit::Place;
                 app.roll_note_pitch = created.pitch;
                 app.roll_note_start = created.start;
                 app.roll_note_end = created.end;
@@ -1263,7 +1460,8 @@ void draw_piano_roll(
             }
         }
     }
-    if (!app.roll_paste && app.roll_erase) {
+    // MIDI erase: right-click on the roll claims pane focus (even if TAB had it).
+    if (pane_is_roll(app.pane_focus) && !app.roll_paste && app.roll_erase) {
         if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
             if (on_grid) {
                 erase_under_cursor();
@@ -1272,12 +1470,18 @@ void draw_piano_roll(
             finish_note_gesture(app, stem);
             app.roll_erase = false;
         }
-    } else if (!app.roll_paste && hovered && app.wave_drag < 0 && on_grid && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    } else if (
+        !app.roll_paste && hovered && app.wave_drag == DragKind::None && on_grid &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        if (app.tab_fingering_mode) {
+            tab_exit_fingering_mode(app);
+        }
+        app.pane_focus = PaneFocus::Roll;  // claim MIDI pane even if TAB had focus
         begin_note_gesture(app, stem);
         app.roll_erase = true;
         erase_under_cursor();
     }
-    if (hovered && app.wave_drag < 0 && !app.roll_erase && (io.MouseWheel != 0.f || io.MouseWheelH != 0.f)) {
+    if (hovered && app.wave_drag == DragKind::None && !app.roll_erase && (io.MouseWheel != 0.f || io.MouseWheelH != 0.f)) {
         bool consumed = false;
         const bool over_roll = on_keys || on_ruler || on_grid || on_overview;
         if (io.KeyCtrl && io.KeyShift && !io.KeyAlt && io.MouseWheel != 0.f && over_roll) {
@@ -1341,9 +1545,9 @@ void draw_piano_roll(
     if (app.roll_paste && !app.roll_clipboard.empty()) {
         double anchor_time = 0;
         int anchor_pitch = 60;
-        paste_anchor(anchor_time, anchor_pitch);
+        paste_anchor(anchor_time, anchor_pitch);  // also refreshes roll_paste_time/pitch for Enter
         std::vector<MidiNote> preview;
-        build_paste_notes(anchor_time, anchor_pitch, preview);
+        build_paste_notes(app, anchor_time, anchor_pitch, length, preview);
         draw->PushClipRect(grid_min, grid_max, true);
         for (const MidiNote& note : preview) {
             if (note.pitch < bottom || note.pitch >= bottom + semis || note.end < t0 || note.start > t0 + span) {
@@ -1361,7 +1565,7 @@ void draw_piano_roll(
         }
         draw->PopClipRect();
     }
-    if (app.wave_drag == kRollBoxDrag) {
+    if (app.wave_drag == DragKind::RollBox && pane_is_roll(app.pane_focus)) {
         const ImVec2 box_min(std::min(app.roll_grab_x, mouse.x), std::min(app.roll_grab_y, mouse.y));
         const ImVec2 box_max(std::max(app.roll_grab_x, mouse.x), std::max(app.roll_grab_y, mouse.y));
         draw->PushClipRect(grid_min, grid_max, true);
@@ -1369,6 +1573,858 @@ void draw_piano_roll(
         draw->AddRect(box_min, box_max, IM_COL32(242, 242, 242, 210), 0.f, 0, std::max(1.f, scale));
         draw->PopClipRect();
     }
+}
+
+int tab_display_string(const MidiNote& note) {
+    if (note_has_fingering(note) && fingering_matches_pitch(note)) {
+        return note.string;
+    }
+    TabSpot spots[8];
+    const int count = collect_guitar_spots(note.pitch, true, spots, 8);
+    return count > 0 ? spots[0].string : 0;
+}
+
+float tab_beat_seconds(const App& app) {
+    if (app.bpm > 1.f) {
+        return 60.f / app.bpm;
+    }
+    return 0.5f;
+}
+
+int tab_note_at(
+    const App& app, int stem, const std::vector<MidiNote>& notes, double t0, double span, float staff_left, float staff_right,
+    const float* string_y, float hit_w, float hit_h, ImVec2 mouse) {
+    if (mouse.x < staff_left || mouse.x > staff_right) {
+        return -1;
+    }
+    const float grid_w = std::max(1.f, staff_right - staff_left);
+    int best = -1;
+    float best_dist = 1e9f;
+    for (int index = static_cast<int>(notes.size()) - 1; index >= 0; --index) {
+        if (!tab_note_on_staff(app, stem, index)) {
+            continue;
+        }
+        const MidiNote& note = notes[static_cast<std::size_t>(index)];
+        if (note.end < t0 || note.start > t0 + span) {
+            continue;
+        }
+        const int string = std::clamp(tab_display_string(note), 0, kGuitarStringCount - 1);
+        const float cx = staff_left + static_cast<float>((note.start - t0) / span) * grid_w;
+        const float cy = string_y[string];
+        if (mouse.x >= cx - hit_w && mouse.x <= cx + hit_w && mouse.y >= cy - hit_h && mouse.y <= cy + hit_h) {
+            const float dist = std::hypot(mouse.x - cx, mouse.y - cy);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best = index;
+            }
+        }
+    }
+    return best;
+}
+
+void draw_tab_staff(
+    App& app, ImDrawList* draw, ImVec2 origin, ImVec2 size, int stem, const bt::Player::Snapshot& transport, double position,
+    double length, bool ready, bool canvas_hot) {
+    const float scale = ui_scale();
+    constexpr int kStrings = kGuitarStringCount;
+    // Match piano-roll key column so TAB and MIDI share the same time axis.
+    const float label_w = std::min(56.f * scale, std::max(36.f * scale, size.x * 0.14f));
+    const float ruler_h = std::min(22.f * scale, std::max(16.f * scale, size.y * 0.07f));
+    const float overview_band = std::min(36.f * scale, std::max(26.f * scale, size.y * 0.1f));
+    const float overview_gap = 8.f * scale;
+    const float area_top = origin.y + ruler_h;
+    const float area_bot = origin.y + size.y - overview_band - overview_gap;
+    const float area_h = std::max(48.f * scale, area_bot - area_top);
+    const float string_gap = std::clamp(std::min(18.f * scale, area_h * 0.11f), 12.f * scale, 22.f * scale);
+    const float staff_h = string_gap * static_cast<float>(kStrings - 1);
+    const float staff_top = area_top + std::max(6.f * scale, (area_h - staff_h) * 0.5f);
+    const float staff_bot = staff_top + staff_h;
+    const float staff_left = origin.x + label_w;
+    const float staff_right = origin.x + size.x;
+    const float grid_w = std::max(1.f, staff_right - staff_left);
+    float string_y[kStrings];
+    for (int string = 0; string < kStrings; ++string) {
+        string_y[string] = staff_top + static_cast<float>(string) * string_gap;
+    }
+    const ImU32 paper = IM_COL32(24, 24, 24, 255);
+    const ImU32 line_ink = IM_COL32(168, 168, 172, 255);
+    const ImU32 bar_ink = IM_COL32(210, 210, 214, 255);
+    const ImU32 beat_ink = IM_COL32(70, 70, 74, 255);
+    const ImU32 digit_ink = IM_COL32(236, 236, 238, 255);
+    const ImU32 digit_mute = IM_COL32(150, 150, 156, 255);
+    const ImU32 select_ink = IM_COL32(255, 196, 72, 255);
+    const ImU32 play_ink = IM_COL32(242, 242, 242, 255);
+
+    sync_roll_viewport(app, stem, length);
+
+    const double t0 = app.roll_time;
+    const double span = std::max(0.25, app.roll_seconds);
+    const ScoreAxis score_axis = make_score_axis(app, stem, staff_left, staff_right, t0, span, true);
+    auto x_of = [&](double time) {
+        if (score_axis.active) {
+            return score_axis.x_of_time(time);
+        }
+        return staff_left + static_cast<float>((time - t0) / span) * grid_w;
+    };
+    auto x_of_note = [&](int /*note_index*/, double time) {
+        // Always MIDI onset X — never rhythm-slot time (prevents group/digit 串位 vs piano roll).
+        return x_of(time);
+    };
+
+    draw->AddRectFilled(origin, ImVec2(staff_right, origin.y + ruler_h), IM_COL32(28, 28, 28, 255));
+    draw->AddRectFilled(ImVec2(origin.x, area_top), ImVec2(staff_right, area_bot), paper);
+    draw->AddRectFilled(ImVec2(origin.x, area_top), ImVec2(staff_left, area_bot), IM_COL32(30, 30, 30, 255));
+
+    // Time ruler + beat grid (same as MIDI). Rhythm-tree duration/rest glyphs deferred.
+    const float pixels_per_second = grid_w / static_cast<float>(span);
+    {
+        const double tick_steps[] = {0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300};
+        double tick = tick_steps[std::size(tick_steps) - 1];
+        for (double candidate : tick_steps) {
+            if (static_cast<float>(candidate) * pixels_per_second >= 72.f * scale) {
+                tick = candidate;
+                break;
+            }
+        }
+        const double first_tick = std::ceil((t0 - 1e-6) / tick) * tick;
+        for (double mark = first_tick; mark < t0 + span; mark += tick) {
+            if (mark < -1e-4) {
+                continue;
+            }
+            const float x = x_of(mark);
+            char label[16];
+            if (tick < 1.0) {
+                std::snprintf(label, sizeof label, "%.1f", mark);
+            } else {
+                const int total = static_cast<int>(std::floor(mark + 1e-3));
+                std::snprintf(label, sizeof label, "%d:%02d", total / 60, total % 60);
+            }
+            text_at(
+                draw, ImVec2(x + 3.f * scale, origin.y + (ruler_h - 12.f * scale) * 0.5f), 12.f * scale,
+                IM_COL32(176, 176, 176, 255), label);
+        }
+    }
+
+    // Six string lines + beat grid (staff only, not full height).
+    const bool have_beats = app.beat_times != nullptr && !app.beat_times->empty();
+    const int parts = division_parts(app.grid_division);
+    bool show_sub = false;
+    if (have_beats) {
+        const double gap = minimum_gap(*app.beat_times, t0, t0 + span);
+        show_sub = parts > 1 && gap > 1e-6 && static_cast<float>(gap / static_cast<double>(parts)) * pixels_per_second >= 10.f * scale;
+    } else if (parts > 1) {
+        const double beat = tab_beat_seconds(app);
+        show_sub = static_cast<float>(beat / static_cast<double>(parts)) * pixels_per_second >= 10.f * scale;
+    }
+    draw->PushClipRect(ImVec2(staff_left, area_top), ImVec2(staff_right, area_bot), true);
+    auto paint_bar = [&](double mark, GridMark kind) {
+        if (kind == GridMark::Sub && !show_sub) {
+            return;
+        }
+        const float x = x_of(mark);
+        if (kind == GridMark::Bar) {
+            draw->AddLine(ImVec2(x, staff_top), ImVec2(x, staff_bot), bar_ink, std::max(1.5f, 1.5f * scale));
+        } else if (kind == GridMark::Beat) {
+            draw->AddLine(ImVec2(x, staff_top), ImVec2(x, staff_bot), beat_ink, 1.f);
+        }
+    };
+    if (have_beats) {
+        each_grid_tick(*app.beat_times, app.grid_division, t0, t0 + span, paint_bar);
+    } else {
+        each_bpm_tick(app.bpm, app.beat_offset, app.grid_division, t0, t0 + span, paint_bar);
+    }
+    for (int string = 0; string < kStrings; ++string) {
+        draw->AddLine(ImVec2(staff_left, string_y[string]), ImVec2(staff_right, string_y[string]), line_ink, std::max(1.f, scale));
+    }
+    // Staff end caps.
+    draw->AddLine(ImVec2(staff_left, staff_top), ImVec2(staff_left, staff_bot), bar_ink, std::max(1.5f, 1.5f * scale));
+
+    auto& stem_notes = app.notes[static_cast<std::size_t>(stem)];
+    if (app.roll_selected.size() != stem_notes.size()) {
+        app.roll_selected.assign(stem_notes.size(), 0);
+    }
+
+    const float digit_font = std::clamp(string_gap * 0.92f, 11.f * scale, 16.f * scale);
+    const float hit_w = std::max(10.f * scale, digit_font * 0.9f);
+    const float hit_h = std::max(8.f * scale, string_gap * 0.45f);
+    const double onset_eps = tab_onset_window_seconds(app);
+
+    struct OnsetGroup {
+        double start = 0;
+        float x = 0.f;
+        float x0 = 0.f;
+        float y0 = 0.f;
+        float x1 = 0.f;
+        float y1 = 0.f;
+        std::vector<int> indices;
+    };
+    std::vector<OnsetGroup> onset_groups;
+    for (std::size_t note_i = 0; note_i < stem_notes.size(); ++note_i) {
+        if (!tab_note_on_staff(app, stem, static_cast<int>(note_i))) {
+            continue;
+        }
+        const MidiNote& note = stem_notes[note_i];
+        if (note.end < t0 || note.start > t0 + span) {
+            continue;
+        }
+        bool placed = false;
+        for (OnsetGroup& group : onset_groups) {
+            if (std::abs(group.start - note.start) <= onset_eps) {
+                group.indices.push_back(static_cast<int>(note_i));
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            onset_groups.push_back(
+                OnsetGroup{note.start, x_of_note(static_cast<int>(note_i), note.start), 0.f, 0.f, 0.f, 0.f,
+                           {static_cast<int>(note_i)}});
+        }
+    }
+
+    const float group_pad_x = std::max(8.f * scale, digit_font * 0.75f);
+    const float group_pad_y = std::max(5.f * scale, string_gap * 0.35f);
+    const float group_radius = 5.f * scale;
+    const ImU32 group_fill = IM_COL32(40, 40, 44, 70);
+    const ImU32 group_fill_hot = IM_COL32(70, 58, 28, 90);
+    const ImU32 group_fill_warn = IM_COL32(70, 52, 18, 90);
+    const ImU32 group_fill_error = IM_COL32(70, 28, 28, 90);
+    const ImU32 group_fill_unsnapped = IM_COL32(48, 48, 52, 100);
+    const ImU32 group_edge = IM_COL32(120, 120, 126, 200);
+    const ImU32 group_edge_warn = IM_COL32(220, 160, 48, 230);
+    const ImU32 group_edge_error = IM_COL32(220, 72, 72, 230);
+    const ImU32 group_edge_unsnapped = IM_COL32(160, 160, 168, 210);
+    for (OnsetGroup& group : onset_groups) {
+        // Box around the note onset (not rhythm-slot width — duration glyphs are deferred).
+        group.x = x_of(group.start);
+        group.x0 = group.x - group_pad_x;
+        group.x1 = group.x + group_pad_x;
+        group.y0 = staff_top - group_pad_y;
+        group.y1 = staff_bot + group_pad_y;
+    }
+
+    const ImVec2 early_mouse = ImGui::GetIO().MousePos;
+    int hover_group = -1;
+    for (int i = 0; i < static_cast<int>(onset_groups.size()); ++i) {
+        const OnsetGroup& group = onset_groups[static_cast<std::size_t>(i)];
+        if (early_mouse.x >= group.x0 && early_mouse.x <= group.x1 && early_mouse.y >= group.y0 &&
+            early_mouse.y <= group.y1) {
+            hover_group = i;
+            break;
+        }
+    }
+    TabGroupConflict hover_conflict = TabGroupConflict::Ok;
+    bool hover_unsnapped = false;
+    for (int i = 0; i < static_cast<int>(onset_groups.size()); ++i) {
+        const OnsetGroup& group = onset_groups[static_cast<std::size_t>(i)];
+        const TabGroupConflict conflict = tab_group_conflict(app, stem, group.indices);
+        const bool snapped =
+            !score_axis.active || tab_group_snapped(app, stem, group.indices);
+        if (i == hover_group) {
+            hover_conflict = conflict;
+            hover_unsnapped = !snapped;
+        }
+        const bool active = app.tab_fingering_mode && !group.indices.empty() &&
+                            tab_selection_locked(app, group.indices.front());
+        ImU32 fill = group_fill;
+        ImU32 edge = group_edge;
+        if (!snapped) {
+            fill = group_fill_unsnapped;
+            edge = group_edge_unsnapped;
+        } else if (conflict == TabGroupConflict::Error) {
+            fill = group_fill_error;
+            edge = group_edge_error;
+        } else if (conflict == TabGroupConflict::Warn) {
+            fill = group_fill_warn;
+            edge = group_edge_warn;
+        }
+        if (active) {
+            // Keep gold selection edge; retain warn/error/unsnapped tint in the fill.
+            fill = (snapped && conflict == TabGroupConflict::Ok) ? group_fill_hot : fill;
+            edge = select_ink;
+        }
+        const ImVec2 bmin(group.x0, group.y0);
+        const ImVec2 bmax(group.x1, group.y1);
+        draw->AddRectFilled(bmin, bmax, fill, group_radius);
+        draw->AddRect(bmin, bmax, edge, group_radius, 0, std::max(1.f, active ? 1.4f * scale : scale));
+    }
+    if (hover_group >= 0 && hover_unsnapped) {
+        ImGui::SetTooltip("%s", t("tab.unsnapped"));
+    } else if (hover_group >= 0 && hover_conflict == TabGroupConflict::Error) {
+        ImGui::SetTooltip("%s", t("tab.conflict_impossible"));
+    } else if (hover_group >= 0 && hover_conflict == TabGroupConflict::Warn) {
+        ImGui::SetTooltip("%s", t("tab.conflict_span"));
+    }
+
+    // Drop-target highlight while dragging a note group onto a rhythm slot.
+    if (app.wave_drag == DragKind::TabGroup && score_axis.active && app.tab_drag_measure >= 0) {
+        for (const ScoreAxisSlot& slot : score_axis.slots) {
+            if (slot.measure == app.tab_drag_measure && slot.beat == app.tab_drag_beat) {
+                const float cx = x_of(slot.time);
+                draw->AddRect(
+                    ImVec2(cx - group_pad_x, staff_top - group_pad_y),
+                    ImVec2(cx + group_pad_x, staff_bot + group_pad_y), select_ink, group_radius, 0,
+                    std::max(1.5f, 1.5f * scale));
+                break;
+            }
+        }
+    }
+
+    auto beat_matches_notes = [&](const TabBeat& beat, const std::vector<int>& indices) {
+        if (beat.rest || beat.note_indices.empty() || indices.empty()) {
+            return false;
+        }
+        if (beat.note_indices.size() != indices.size()) {
+            return false;
+        }
+        for (int index : indices) {
+            if (std::find(beat.note_indices.begin(), beat.note_indices.end(), index) == beat.note_indices.end()) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // Fret digits — all guitar MIDI notes (unfingered show as ?).
+    // Sounding uses TAB display end (clipped at next onset) without mutating MIDI tails.
+    for (std::size_t note_i = 0; note_i < stem_notes.size(); ++note_i) {
+        if (!tab_note_on_staff(app, stem, static_cast<int>(note_i))) {
+            continue;
+        }
+        const MidiNote& note = stem_notes[note_i];
+        if (note.end < t0 || note.start > t0 + span) {
+            continue;
+        }
+        const int string = std::clamp(tab_display_string(note), 0, kStrings - 1);
+        const float x = x_of_note(static_cast<int>(note_i), note.start);
+        const float y = string_y[string];
+        // Decided = has string/fret. Pitch mismatch (e.g. out-of-range soft park) still shows a fret, not "?".
+        const bool fingered = note_has_fingering(note);
+        const bool pitch_ok = fingered && fingering_matches_pitch(note);
+        const std::vector<int>* group_for_note = nullptr;
+        for (const OnsetGroup& group : onset_groups) {
+            if (std::find(group.indices.begin(), group.indices.end(), static_cast<int>(note_i)) !=
+                group.indices.end()) {
+                group_for_note = &group.indices;
+                break;
+            }
+        }
+        const std::vector<int> solo{static_cast<int>(note_i)};
+        const double display_end =
+            tab_display_end(stem_notes, group_for_note != nullptr ? *group_for_note : solo,
+                            static_cast<int>(note_i), onset_eps);
+        const bool sounding = note.start <= position && position < display_end;
+        const bool selected = note_i < app.roll_selected.size() && app.roll_selected[note_i];
+        const bool in_mode = tab_selection_locked(app, static_cast<int>(note_i));
+        const bool dim = app.tab_fingering_mode && !in_mode;
+        char fret_text[8];
+        if (fingered) {
+            std::snprintf(fret_text, sizeof fret_text, "%d", note.fret);
+        } else {
+            std::snprintf(fret_text, sizeof fret_text, "?");
+        }
+        const ImVec2 text = text_size(digit_font, fret_text);
+        const float pad_x = 2.5f * scale;
+        const float pad_y = 1.f * scale;
+        const ImVec2 wipe_min(x - text.x * 0.5f - pad_x, y - text.y * 0.5f - pad_y);
+        const ImVec2 wipe_max(x + text.x * 0.5f + pad_x, y + text.y * 0.5f + pad_y);
+        draw->AddRectFilled(wipe_min, wipe_max, paper);
+        if (selected || in_mode) {
+            draw->AddRect(wipe_min, wipe_max, select_ink, 2.f * scale, 0, std::max(1.2f, scale));
+        }
+        ImU32 ink = sounding ? select_ink : (pitch_ok ? digit_ink : digit_mute);
+        if (dim) {
+            ink = with_alpha(ink, 0.35f);
+        }
+        text_at(draw, ImVec2(x - text.x * 0.5f, y - text.y * 0.5f), digit_font, ink, fret_text);
+    }
+
+    // Combo menu geometry (drawn after PopClipRect so it is not clipped by the staff).
+    struct ComboMenuRow {
+        ImVec2 min{};
+        ImVec2 max{};
+        int combo_index = 0;
+    };
+    std::vector<ComboMenuRow> combo_menu_rows;
+    ImVec2 combo_menu_min(0.f, 0.f);
+    ImVec2 combo_menu_max(0.f, 0.f);
+    bool combo_menu_open = false;
+    int active_onset = -1;
+    std::vector<TabCombo> active_combos;
+    std::vector<std::string> active_combo_labels;
+    float combo_menu_font = 11.f * scale;
+    float combo_menu_pad = 6.f * scale;
+    float combo_menu_row_h = 18.f * scale;
+    for (int i = 0; i < static_cast<int>(onset_groups.size()); ++i) {
+        const OnsetGroup& group = onset_groups[static_cast<std::size_t>(i)];
+        if (app.tab_fingering_mode && !group.indices.empty() && tab_selection_locked(app, group.indices.front())) {
+            active_onset = i;
+            break;
+        }
+    }
+    if (active_onset >= 0) {
+        const OnsetGroup& group = onset_groups[static_cast<std::size_t>(active_onset)];
+        active_combos = enumerate_fingering_combos(app, stem, group.indices);
+        if (!active_combos.empty()) {
+            static const char* kNames[kStrings] = {"e", "B", "G", "D", "A", "E"};
+            combo_menu_row_h = std::max(18.f * scale, digit_font + 6.f * scale);
+            combo_menu_pad = 6.f * scale;
+            const float gap = 8.f * scale;
+            combo_menu_font = std::max(11.f * scale, digit_font * 0.85f);
+            float max_label_w = text_size(combo_menu_font, t("tab.combo")).x;
+            active_combo_labels.reserve(active_combos.size());
+            for (const TabCombo& combo : active_combos) {
+                std::string label;
+                for (std::size_t s = 0; s < combo.spots.size(); ++s) {
+                    if (s > 0) {
+                        label += ' ';
+                    }
+                    const int string = std::clamp(combo.spots[s].string, 0, kStrings - 1);
+                    label += kNames[string];
+                    label += std::to_string(combo.spots[s].fret);
+                }
+                max_label_w = std::max(max_label_w, text_size(combo_menu_font, label.c_str()).x);
+                active_combo_labels.push_back(std::move(label));
+            }
+            const float menu_w = max_label_w + combo_menu_pad * 2.f;
+            const float menu_h =
+                combo_menu_pad + combo_menu_row_h + static_cast<float>(active_combos.size()) * combo_menu_row_h +
+                combo_menu_pad;
+            // Prefer right of the group; flip left only if needed — never cover the group.
+            float menu_x = group.x1 + gap;
+            if (menu_x + menu_w > staff_right && group.x0 - gap - menu_w >= origin.x) {
+                menu_x = group.x0 - gap - menu_w;
+            }
+            float menu_y = group.y0;
+            if (menu_y + menu_h > area_bot) {
+                menu_y = std::max(origin.y, area_bot - menu_h);
+            }
+            combo_menu_min = ImVec2(menu_x, menu_y);
+            combo_menu_max = ImVec2(menu_x + menu_w, menu_y + menu_h);
+            combo_menu_open = true;
+            for (int c = 0; c < static_cast<int>(active_combos.size()); ++c) {
+                const float y0 = menu_y + combo_menu_pad + combo_menu_row_h + static_cast<float>(c) * combo_menu_row_h;
+                const ImVec2 row_min(menu_x + 3.f * scale, y0);
+                const ImVec2 row_max(menu_x + menu_w - 3.f * scale, y0 + combo_menu_row_h - 2.f * scale);
+                combo_menu_rows.push_back(ComboMenuRow{row_min, row_max, c});
+            }
+        }
+    }
+
+    if (position >= t0 && position <= t0 + span) {
+        const float x = x_of(position);
+        draw->AddLine(ImVec2(x, staff_top - 4.f * scale), ImVec2(x, staff_bot), play_ink, std::max(1.5f, 1.5f * scale));
+    }
+    if (ready && length > 0) {
+        draw_ab_loop(
+            draw, scale, ImVec2(staff_left, staff_top - 4.f * scale), ImVec2(staff_right, staff_bot), transport.loop_a >= 0,
+            x_of(std::max(0.0, transport.loop_a)), transport.loop_b >= 0, x_of(std::max(0.0, transport.loop_b)), false,
+            IM_COL32(242, 242, 242, 28), IM_COL32(242, 242, 242, 220), IM_COL32(242, 242, 242, 255), IM_COL32(26, 26, 26, 255),
+            IM_COL32(26, 26, 26, 180));
+    }
+    draw->PopClipRect();
+    draw->AddLine(ImVec2(staff_left, origin.y), ImVec2(staff_left, area_bot), IM_COL32(12, 12, 12, 255), std::max(1.f, scale));
+
+    // Draw fingering menu above the staff so it never covers the highlighted group box.
+    if (combo_menu_open) {
+        const ImVec2 mouse_now = ImGui::GetIO().MousePos;
+        draw->AddRectFilled(combo_menu_min, combo_menu_max, IM_COL32(32, 32, 36, 245), 5.f * scale);
+        draw->AddRect(combo_menu_min, combo_menu_max, select_ink, 5.f * scale, 0, std::max(1.f, scale));
+        text_at(
+            draw, ImVec2(combo_menu_min.x + combo_menu_pad, combo_menu_min.y + combo_menu_pad * 0.5f), combo_menu_font,
+            select_ink, t("tab.combo"));
+        for (const ComboMenuRow& row : combo_menu_rows) {
+            const bool cur = row.combo_index == app.tab_combo_index;
+            const bool row_hot =
+                mouse_now.x >= row.min.x && mouse_now.x <= row.max.x && mouse_now.y >= row.min.y &&
+                mouse_now.y <= row.max.y;
+            if (cur || row_hot) {
+                draw->AddRectFilled(
+                    row.min, row.max, cur ? IM_COL32(70, 58, 28, 255) : IM_COL32(48, 48, 52, 255), 3.f * scale);
+            }
+            text_at(
+                draw, ImVec2(combo_menu_min.x + combo_menu_pad, row.min.y + (combo_menu_row_h - combo_menu_font) * 0.35f),
+                combo_menu_font, cur ? select_ink : digit_ink,
+                active_combo_labels[static_cast<std::size_t>(row.combo_index)].c_str());
+        }
+    }
+    const double song = roll_song_span(length);
+    const ImVec2 overview_min(staff_left, std::min(area_bot + overview_gap, origin.y + size.y - 8.f));
+    const ImVec2 overview_max(staff_right, std::max(overview_min.y + 8.f, origin.y + size.y));
+    const float overview_w = std::max(1.f, overview_max.x - overview_min.x);
+    const float overview_h = std::max(1.f, overview_max.y - overview_min.y);
+    auto overview_x = [&](double time) {
+        return overview_min.x + static_cast<float>(time / song) * overview_w;
+    };
+    float view_x1 = overview_x(t0);
+    float view_x2 = overview_x(t0 + span);
+    const float min_grab = 6.f * scale;
+    if (view_x2 - view_x1 < min_grab) {
+        const float mid = (view_x1 + view_x2) * 0.5f;
+        view_x1 = mid - min_grab * 0.5f;
+        view_x2 = mid + min_grab * 0.5f;
+    }
+    view_x1 = std::clamp(view_x1, overview_min.x, overview_max.x);
+    view_x2 = std::clamp(view_x2, overview_min.x, overview_max.x);
+    draw->AddRectFilled(overview_min, overview_max, IM_COL32(16, 16, 16, 255));
+    draw->PushClipRect(overview_min, overview_max, true);
+    const float dot = std::max(1.25f, 1.6f * scale);
+    for (std::size_t note_i = 0; note_i < stem_notes.size(); ++note_i) {
+        if (!tab_note_on_staff(app, stem, static_cast<int>(note_i))) {
+            continue;
+        }
+        const MidiNote& note = stem_notes[note_i];
+        const int string = std::clamp(tab_display_string(note), 0, kStrings - 1);
+        const float cx = overview_x(note.start);
+        const float cy = overview_min.y + (static_cast<float>(string) + 0.5f) / static_cast<float>(kStrings) * overview_h;
+        draw->AddRectFilled(ImVec2(cx - dot, cy - dot), ImVec2(cx + dot, cy + dot), IM_COL32(200, 200, 205, 200));
+    }
+    draw->PopClipRect();
+    draw->AddRectFilled(ImVec2(view_x1, overview_min.y), ImVec2(view_x2, overview_max.y), IM_COL32(242, 242, 242, 36));
+    draw->AddRect(
+        ImVec2(view_x1, overview_min.y), ImVec2(view_x2, overview_max.y), IM_COL32(242, 242, 242, 210), 0.f, 0,
+        std::max(1.f, scale));
+
+    const bool hovered = canvas_hot;
+    ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 mouse = io.MousePos;
+    const bool on_ruler = mouse.x >= staff_left && mouse.x < staff_right && mouse.y >= origin.y && mouse.y < area_top;
+    const bool on_staff =
+        mouse.x >= staff_left && mouse.x < staff_right && mouse.y >= staff_top - group_pad_y &&
+        mouse.y <= staff_bot + string_gap * 0.35f;
+    const bool on_overview =
+        mouse.x >= overview_min.x && mouse.x < overview_max.x && mouse.y >= overview_min.y && mouse.y < overview_max.y;
+    const bool on_viewport = on_overview && mouse.x >= view_x1 && mouse.x <= view_x2;
+    const bool on_canvas = mouse.x >= staff_left && mouse.x < staff_right && mouse.y >= area_top && mouse.y < area_bot;
+    if (hover_group < 0) {
+        for (int i = 0; i < static_cast<int>(onset_groups.size()); ++i) {
+            const OnsetGroup& group = onset_groups[static_cast<std::size_t>(i)];
+            if (mouse.x >= group.x0 && mouse.x <= group.x1 && mouse.y >= group.y0 && mouse.y <= group.y1) {
+                hover_group = i;
+                break;
+            }
+        }
+    }
+    auto time_at = [&](float x) {
+        if (score_axis.active) {
+            return std::max(0.0, score_axis.time_at_x(x));
+        }
+        return std::max(0.0, t0 + static_cast<double>((x - staff_left) / grid_w) * span);
+    };
+    const bool on_combo_menu =
+        combo_menu_open && mouse.x >= combo_menu_min.x && mouse.x <= combo_menu_max.x && mouse.y >= combo_menu_min.y &&
+        mouse.y <= combo_menu_max.y;
+    auto string_at = [&](float y) {
+        int best = 0;
+        float best_d = std::fabs(y - string_y[0]);
+        for (int s = 1; s < kStrings; ++s) {
+            const float d = std::fabs(y - string_y[s]);
+            if (d < best_d) {
+                best_d = d;
+                best = s;
+            }
+        }
+        return best;
+    };
+    auto clear_tab_selection = [&] {
+        tab_exit_fingering_mode(app);
+        app.roll_selected.assign(stem_notes.size(), 0);
+    };
+    auto erase_under_cursor = [&] {
+        for (;;) {
+            const int hit =
+                tab_note_at(app, stem, stem_notes, t0, span, staff_left, staff_right, string_y, hit_w, hit_h, mouse);
+            if (hit < 0) {
+                break;
+            }
+            stem_notes.erase(stem_notes.begin() + hit);
+        }
+        app.roll_selected.assign(stem_notes.size(), 0);
+        if (!tab_score_empty(app.tab_scores[static_cast<std::size_t>(stem)])) {
+            tab_score_sync_from_midi(app, stem);
+        }
+    };
+
+    if (app.wave_drag == DragKind::TabGroup) {
+        // TAB groups only drop onto already-marked rhythm slots.
+        tab_score_ensure(app, stem);
+        const TabScore& score_now = app.tab_scores[static_cast<std::size_t>(stem)];
+        const double hover_t = time_at(mouse.x);
+        double best = 1e9;
+        app.tab_drag_measure = -1;
+        app.tab_drag_beat = -1;
+        for (int m = 0; m < static_cast<int>(score_now.measures.size()); ++m) {
+            const TabMeasure& measure = score_now.measures[static_cast<std::size_t>(m)];
+            for (int b = 0; b < static_cast<int>(measure.beats.size()); ++b) {
+                const double dist = std::abs(measure.beats[static_cast<std::size_t>(b)].time - hover_t);
+                if (dist < best) {
+                    best = dist;
+                    app.tab_drag_measure = m;
+                    app.tab_drag_beat = b;
+                }
+            }
+        }
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const bool nudged =
+                std::fabs(mouse.x - app.roll_grab_x) > 3.f || std::fabs(mouse.y - app.roll_grab_y) > 3.f;
+            if (nudged && app.tab_drag_measure >= 0 && !app.tab_drag_notes.empty()) {
+                tab_score_snap_group(app, stem, app.tab_drag_notes, app.tab_drag_measure, app.tab_drag_beat);
+            }
+            app.wave_drag = DragKind::None;
+            app.tab_group_dragging = false;
+            app.tab_drag_notes.clear();
+            app.tab_drag_measure = -1;
+            app.tab_drag_beat = -1;
+        }
+    } else if (app.wave_drag == DragKind::RollBox && pane_is_tab(app.pane_focus)) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const float x0 = std::min(app.roll_grab_x, mouse.x);
+            const float x1 = std::max(app.roll_grab_x, mouse.x);
+            const float y0 = std::min(app.roll_grab_y, mouse.y);
+            const float y1 = std::max(app.roll_grab_y, mouse.y);
+            const bool nudged = (x1 - x0) > 2.f || (y1 - y0) > 2.f;
+            app.roll_selected.assign(stem_notes.size(), 0);
+            if (nudged) {
+                const double t_lo = time_at(x0);
+                const double t_hi = time_at(x1);
+                int s0 = string_at(y0);
+                int s1 = string_at(y1);
+                if (s0 > s1) {
+                    std::swap(s0, s1);
+                }
+                for (int index = 0; index < static_cast<int>(stem_notes.size()); ++index) {
+                    if (!tab_note_on_staff(app, stem, index)) {
+                        continue;
+                    }
+                    const MidiNote& note = stem_notes[static_cast<std::size_t>(index)];
+                    if (note.end < t_lo || note.start > t_hi) {
+                        continue;
+                    }
+                    const int string = std::clamp(tab_display_string(note), 0, kStrings - 1);
+                    if (string < s0 || string > s1) {
+                        continue;
+                    }
+                    app.roll_selected[static_cast<std::size_t>(index)] = 1;
+                }
+            } else {
+                const int hit =
+                    tab_note_at(app, stem, stem_notes, t0, span, staff_left, staff_right, string_y, hit_w, hit_h, mouse);
+                if (hit >= 0) {
+                    app.roll_selected[static_cast<std::size_t>(hit)] = 1;
+                }
+            }
+            app.wave_drag = DragKind::None;
+        }
+    } else if (app.wave_drag == DragKind::RollOverview) {
+        const float dx = mouse.x - app.roll_grab_x;
+        app.roll_time = app.roll_grab_time + static_cast<double>(dx) / static_cast<double>(overview_w) * song;
+        clamp_roll(app, length);
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            app.wave_drag = DragKind::None;
+        }
+    } else if (app.wave_drag == DragKind::RollPan) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+            app.wave_drag = DragKind::None;
+        } else {
+            const float dx = mouse.x - app.roll_grab_x;
+            const float dy = mouse.y - app.roll_grab_y;
+            app.roll_time = app.roll_grab_time - static_cast<double>(dx) * static_cast<double>(app.roll_pan_sec_per_px);
+            if (app.roll_pan_row_h > 0.1f) {
+                app.roll_bottom =
+                    app.roll_grab_bottom + static_cast<int>(std::floor(static_cast<double>(dy / app.roll_pan_row_h)));
+            }
+            clamp_roll(app, length);
+        }
+    } else if (app.wave_drag == DragKind::RollSeek) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            app.wave_drag = DragKind::None;
+        } else if (ready && length > 0) {
+            app.player->seek(std::clamp(time_at(mouse.x), 0.0, length));
+        }
+    }
+
+    // Pane-local start so TAB pan lock uses TAB grid_w, not the piano roll's.
+    if ((on_staff || on_canvas || on_ruler) && app.wave_drag == DragKind::None &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+        if (app.tab_fingering_mode) {
+            clear_tab_selection();
+        }
+        app.wave_drag = DragKind::RollPan;
+        const ImVec2 press = io.MouseClickedPos[ImGuiMouseButton_Middle];
+        app.roll_grab_x = press.x;
+        app.roll_grab_y = press.y;
+        app.roll_grab_time = app.roll_time;
+        app.roll_grab_bottom = app.roll_bottom;
+        app.roll_pan_sec_per_px = static_cast<float>(span) / grid_w;
+        app.roll_pan_row_h = 0.f;
+    }
+    if (hovered && app.wave_drag == DragKind::None && ready && length > 0 && on_ruler && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (app.tab_fingering_mode) {
+            clear_tab_selection();
+        }
+        app.wave_drag = DragKind::RollSeek;
+        app.player->seek(std::clamp(time_at(mouse.x), 0.0, length));
+    }
+    if (hovered && app.wave_drag == DragKind::None && !app.roll_erase && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (on_viewport) {
+            if (app.tab_fingering_mode) {
+                clear_tab_selection();
+            }
+            app.wave_drag = DragKind::RollOverview;
+            app.roll_grab_x = mouse.x;
+            app.roll_grab_y = mouse.y;
+            app.roll_grab_time = app.roll_time;
+        } else if ((on_staff || on_canvas) && io.KeyShift) {
+            clear_tab_selection();
+            app.pane_focus = PaneFocus::Tab;
+            app.wave_drag = DragKind::RollBox;
+            app.roll_grab_x = mouse.x;
+            app.roll_grab_y = mouse.y;
+        } else if (on_staff || on_canvas || on_combo_menu) {
+            app.pane_focus = PaneFocus::Tab;
+            int menu_hit = -1;
+            for (const ComboMenuRow& row : combo_menu_rows) {
+                if (mouse.x >= row.min.x && mouse.x <= row.max.x && mouse.y >= row.min.y && mouse.y <= row.max.y) {
+                    menu_hit = row.combo_index;
+                    break;
+                }
+            }
+            if (menu_hit >= 0) {
+                tab_apply_combo(app, stem, app.tab_focus_group, menu_hit);
+            } else {
+                int group_hit = hover_group;
+                if (group_hit < 0) {
+                    const int hit =
+                        tab_note_at(app, stem, stem_notes, t0, span, staff_left, staff_right, string_y, hit_w, hit_h, mouse);
+                    if (hit >= 0) {
+                        for (int i = 0; i < static_cast<int>(onset_groups.size()); ++i) {
+                            const OnsetGroup& group = onset_groups[static_cast<std::size_t>(i)];
+                            if (std::find(group.indices.begin(), group.indices.end(), hit) != group.indices.end()) {
+                                group_hit = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (group_hit >= 0) {
+                    const OnsetGroup& group = onset_groups[static_cast<std::size_t>(group_hit)];
+                    tab_focus_group_notes(app, stem, group.indices);
+                    tab_score_ensure(app, stem);
+                    const TabScore& score_now = app.tab_scores[static_cast<std::size_t>(stem)];
+                    for (int m = 0; m < static_cast<int>(score_now.measures.size()); ++m) {
+                        const TabMeasure& measure = score_now.measures[static_cast<std::size_t>(m)];
+                        for (int b = 0; b < static_cast<int>(measure.beats.size()); ++b) {
+                            const TabBeat& beat = measure.beats[static_cast<std::size_t>(b)];
+                            if (beat_matches_notes(beat, group.indices)) {
+                                app.tab_score_measure = m;
+                                app.tab_score_beat = b;
+                                app.tab_duration = beat.duration;
+                                app.tab_duration_dotted = beat.dotted;
+                                break;
+                            }
+                        }
+                    }
+                    // Score mode: drag group onto existing rhythm slots (writes MIDI on drop).
+                    if (score_axis.active) {
+                        app.wave_drag = DragKind::TabGroup;
+                        app.tab_group_dragging = true;
+                        app.tab_drag_notes = group.indices;
+                        app.tab_drag_measure = app.tab_score_measure;
+                        app.tab_drag_beat = app.tab_score_beat;
+                        app.roll_grab_x = mouse.x;
+                        app.roll_grab_y = mouse.y;
+                    }
+                } else if (!on_combo_menu) {
+                    clear_tab_selection();
+                    // Click empty staff: snap score caret to nearest beat by time.
+                    tab_score_ensure(app, stem);
+                    const TabScore& score_now = app.tab_scores[static_cast<std::size_t>(stem)];
+                    const double click_t = time_at(mouse.x);
+                    double best = 1e9;
+                    for (int m = 0; m < static_cast<int>(score_now.measures.size()); ++m) {
+                        const TabMeasure& measure = score_now.measures[static_cast<std::size_t>(m)];
+                        for (int b = 0; b < static_cast<int>(measure.beats.size()); ++b) {
+                            const double dist = std::abs(measure.beats[static_cast<std::size_t>(b)].time - click_t);
+                            if (dist < best) {
+                                best = dist;
+                                app.tab_score_measure = m;
+                                app.tab_score_beat = b;
+                                app.tab_duration = measure.beats[static_cast<std::size_t>(b)].duration;
+                                app.tab_duration_dotted = measure.beats[static_cast<std::size_t>(b)].dotted;
+                            }
+                        }
+                    }
+                    app.tab_score_string = string_at(mouse.y);
+                }
+            }
+        }
+    }
+    if (pane_is_tab(app.pane_focus) && !app.roll_paste && app.roll_erase) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+            if (on_staff || on_canvas) {
+                erase_under_cursor();
+            }
+        } else {
+            finish_note_gesture(app, stem);
+            app.roll_erase = false;
+        }
+    } else if (
+        hovered && app.wave_drag == DragKind::None && !app.roll_paste && (on_staff || on_canvas) &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        clear_tab_selection();
+        app.pane_focus = PaneFocus::Tab;
+        begin_note_gesture(app, stem);
+        app.roll_erase = true;
+        erase_under_cursor();
+    }
+
+    if (app.wave_drag == DragKind::RollBox && pane_is_tab(app.pane_focus)) {
+        const ImVec2 box_min(std::min(app.roll_grab_x, mouse.x), std::min(app.roll_grab_y, mouse.y));
+        const ImVec2 box_max(std::max(app.roll_grab_x, mouse.x), std::max(app.roll_grab_y, mouse.y));
+        draw->AddRectFilled(box_min, box_max, IM_COL32(242, 242, 242, 36));
+        draw->AddRect(box_min, box_max, IM_COL32(242, 242, 242, 210), 0.f, 0, std::max(1.f, scale));
+    }
+
+    if (hovered && app.wave_drag == DragKind::None && !app.roll_erase && (io.MouseWheel != 0.f || io.MouseWheelH != 0.f)) {
+        bool consumed = false;
+        const bool over = on_ruler || on_staff || on_canvas || on_overview || on_combo_menu;
+        if ((hover_group >= 0 || on_combo_menu) && io.MouseWheel != 0.f && !io.KeyCtrl) {
+            const int cycle_group = hover_group >= 0 ? hover_group : active_onset;
+            if (cycle_group >= 0) {
+                const OnsetGroup& group = onset_groups[static_cast<std::size_t>(cycle_group)];
+                const int wheel_delta = io.MouseWheel > 0.f ? 1 : -1;
+                // Wheel only changes fingering; it does not highlight / focus the group.
+                tab_cycle_notes_combo(app, stem, group.indices, wheel_delta);
+                consumed = true;
+            }
+        } else if (io.KeyCtrl && !io.KeyAlt && io.MouseWheel != 0.f && over) {
+            const float frac = std::clamp((mouse.x - staff_left) / grid_w, 0.f, 1.f);
+            const double anchor = t0 + static_cast<double>(frac) * span;
+            const double next = std::clamp(span * std::pow(0.8, static_cast<double>(io.MouseWheel)), 0.25, song);
+            app.roll_seconds = next;
+            app.roll_time = anchor - static_cast<double>(frac) * next;
+            consumed = true;
+        } else if (on_ruler && io.MouseWheel != 0.f) {
+            const float frac = std::clamp((mouse.x - staff_left) / grid_w, 0.f, 1.f);
+            const double anchor = t0 + static_cast<double>(frac) * span;
+            const double next = std::clamp(span * std::pow(0.8, static_cast<double>(io.MouseWheel)), 0.25, song);
+            app.roll_seconds = next;
+            app.roll_time = anchor - static_cast<double>(frac) * next;
+            consumed = true;
+        } else if ((on_staff || on_canvas) && (io.MouseWheel != 0.f || io.MouseWheelH != 0.f)) {
+            const float notches = io.MouseWheelH != 0.f ? io.MouseWheelH : io.MouseWheel;
+            app.roll_time -= static_cast<double>(notches) * span * 0.1;
+            consumed = true;
+        }
+        if (consumed || over) {
+            if (consumed) {
+                clamp_roll(app, length);
+            }
+            io.MouseWheel = 0.f;
+            io.MouseWheelH = 0.f;
+        }
+    }
+
 }
 
 }  // namespace
@@ -1464,20 +2520,6 @@ void instrument_pitch_bounds(bool bass, int& low, int& high) {
     high = top + kFretCount;
 }
 
-void viewport_pitch_range(const App& app, int& lo, int& hi) {
-    if (app.midi_view == MidiView::Guitar || app.midi_view == MidiView::Bass) {
-        const bool bass = app.midi_view == MidiView::Bass;
-        lo = bass ? app.bass_pitch_min : app.guitar_pitch_min;
-        hi = bass ? app.bass_pitch_max : app.guitar_pitch_max;
-    } else {
-        lo = std::min(app.key_min, app.key_max);
-        hi = std::max(app.key_min, app.key_max);
-    }
-    if (lo > hi) {
-        std::swap(lo, hi);
-    }
-}
-
 void midi_note_name(int pitch, char* text, std::size_t size) {
     const int wrapped = pitch % 12;
     const int degree = wrapped < 0 ? wrapped + 12 : wrapped;
@@ -1486,31 +2528,31 @@ void midi_note_name(int pitch, char* text, std::size_t size) {
 }
 
 void draw_midi_canvas(App& app, const bt::Player::Snapshot& transport, double length, bool ready, ImVec2 size) {
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && app.wave_drag == kFallDrag) {
-        app.wave_drag = -1;
+    if (ImGui::GetIO().AppFocusLost) {
+        cancel_pointer_gestures(app);
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        (app.wave_drag == DragKind::Fall || app.wave_drag == DragKind::TabSplit)) {
+        app.wave_drag = DragKind::None;
     }
     if (app.note_stage != NoteStage::Midi &&
-        (app.wave_drag == kRollNoteDrag || app.wave_drag == kRollOverviewDrag || app.wave_drag == kRollPanDrag ||
-         app.wave_drag == kRollSeekDrag || app.wave_drag == kRollBoxDrag || app.roll_erase || app.roll_paste)) {
-        if (app.note_gesture) {
-            finish_note_gesture(app, app.note_gesture_stem);
-        }
-        app.wave_drag = -1;
-        app.roll_note = -1;
-        app.roll_erase = false;
-        app.roll_drag_group.clear();
+        (app.wave_drag == DragKind::RollNote || app.wave_drag == DragKind::RollOverview ||
+         app.wave_drag == DragKind::RollPan || app.wave_drag == DragKind::RollSeek ||
+         app.wave_drag == DragKind::RollBox || app.wave_drag == DragKind::TabSplit || app.wave_drag == DragKind::TabGroup ||
+         app.roll_erase || app.roll_paste)) {
+        cancel_pointer_gestures(app);
         app.roll_selected.clear();
-        app.roll_paste = false;
+        tab_exit_fingering_mode(app);
     }
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Right) && app.loop_drag == kFallDrag) {
-        app.loop_drag = -1;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Right) && app.loop_drag == DragKind::Fall) {
+        app.loop_drag = DragKind::None;
     }
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     size.x = std::max(1.f, size.x);
     size.y = std::max(1.f, size.y);
     ImGui::InvisibleButton("midi-view", size);
-    const bool hovered = ImGui::IsItemHovered();
-    if (hovered && app.note_stage != NoteStage::Midi && app.midi_view == MidiView::Fall) {
+    const bool canvas_hot = midi_canvas_hot(origin.x, origin.y, size.x, size.y);
+    if (canvas_hot && app.note_stage == NoteStage::Midi && app.midi_view == MidiView::Fall) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
     }
     ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -1519,14 +2561,63 @@ void draw_midi_canvas(App& app, const bt::Player::Snapshot& transport, double le
     draw->PushClipRect(origin, corner, true);
     draw->AddRectFilled(origin, corner, IM_COL32(20, 20, 20, 255));
     const int stem = std::clamp(app.selected, 0, bt::kStemCount - 1);
+    const float scale = ui_scale();
     if (app.note_stage == NoteStage::Midi) {
-        draw_piano_roll(app, draw, origin, size, stem, transport, transport.position, length, ready);
+        app.tab_pane_ratio = std::clamp(app.tab_pane_ratio, 0.15f, 0.55f);
+        const float split_h = std::max(6.f * scale, 8.f);
+        const float tab_h = std::clamp(size.y * app.tab_pane_ratio, 72.f * scale, size.y - 120.f * scale);
+        const ImVec2 tab_origin = origin;
+        const ImVec2 tab_size(size.x, tab_h);
+        const ImVec2 split_origin(origin.x, origin.y + tab_h);
+        const ImVec2 roll_origin(origin.x, origin.y + tab_h + split_h);
+        const ImVec2 roll_size(size.x, std::max(80.f * scale, size.y - tab_h - split_h));
+
+        if (app.midi_view == MidiView::Guitar || app.midi_view == MidiView::Bass) {
+            draw_fretboard(app, draw, tab_origin, tab_size, stem, transport.position);
+        } else if (app.midi_view == MidiView::Fall) {
+            draw_fall(app, draw, tab_origin, tab_size, stem, transport.position, length, ready, canvas_hot);
+        } else {
+            draw_tab_staff(
+                app, draw, tab_origin, tab_size, stem, transport, transport.position, length, ready, canvas_hot);
+        }
+
+        draw->AddRectFilled(split_origin, ImVec2(split_origin.x + size.x, split_origin.y + split_h), IM_COL32(36, 36, 36, 255));
+        const float grip_w = 28.f * scale;
+        const float grip_x = split_origin.x + (size.x - grip_w) * 0.5f;
+        const float mid_y = split_origin.y + split_h * 0.5f;
+        draw->AddLine(ImVec2(grip_x, mid_y), ImVec2(grip_x + grip_w, mid_y), IM_COL32(120, 120, 120, 255), 1.5f * scale);
+        if (canvas_hot && app.wave_drag == DragKind::None) {
+            const ImVec2 mouse = ImGui::GetIO().MousePos;
+            if (mouse.y >= split_origin.y && mouse.y < split_origin.y + split_h) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    if (app.tab_fingering_mode) {
+                        tab_exit_fingering_mode(app);
+                        app.roll_selected.assign(app.notes[static_cast<std::size_t>(stem)].size(), 0);
+                    }
+                    app.wave_drag = DragKind::TabSplit;
+                    app.roll_grab_y = mouse.y;
+                }
+            }
+        }
+        if (app.wave_drag == DragKind::TabSplit) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && size.y > 1.f) {
+                const float mouse_y = ImGui::GetIO().MousePos.y;
+                const float tab_from_top = mouse_y - origin.y;
+                app.tab_pane_ratio = std::clamp(tab_from_top / size.y, 0.15f, 0.55f);
+            } else {
+                app.wave_drag = DragKind::None;
+            }
+        }
+
+        draw_piano_roll(
+            app, draw, roll_origin, roll_size, stem, transport, transport.position, length, ready, canvas_hot);
     } else if (app.midi_view == MidiView::Guitar || app.midi_view == MidiView::Bass) {
         draw_fretboard(app, draw, origin, size, stem, transport.position);
     } else {
-        draw_fall(app, draw, origin, size, stem, transport.position, length, ready);
+        draw_fall(app, draw, origin, size, stem, transport.position, length, ready, canvas_hot);
     }
-    draw_beat_frame(app, draw, origin, size);
     draw->PopClipRect();
     if (!ready) {
         const float alpha = ImGui::GetStyle().DisabledAlpha;
@@ -1581,11 +2672,62 @@ void midi_begin_paste_preview(App& app) {
     if (app.note_stage != NoteStage::Midi || app.roll_clipboard.empty()) {
         return;
     }
-    app.wave_drag = -1;
+    app.wave_drag = DragKind::None;
     app.roll_note = -1;
     app.roll_erase = false;
     app.roll_drag_group.clear();
     app.roll_paste = true;
+}
+
+void midi_cancel_paste(App& app) {
+    app.roll_paste = false;
+}
+
+bool midi_commit_paste_preview(App& app) {
+    if (!app.roll_paste) {
+        return false;
+    }
+    if (app.roll_clipboard.empty()) {
+        app.roll_paste = false;
+        return false;
+    }
+    const double length = app.player != nullptr ? app.player->snapshot().length : 0.0;
+    const int stem = std::clamp(app.selected, 0, bt::kStemCount - 1);
+    auto& stem_notes = app.notes[static_cast<std::size_t>(stem)];
+    std::vector<MidiNote> placed;
+    build_paste_notes(app, app.roll_paste_time, app.roll_paste_pitch, length, placed);
+    if (placed.empty()) {
+        app.roll_paste = false;
+        return false;
+    }
+    begin_note_gesture(app, stem);
+    const int first = static_cast<int>(stem_notes.size());
+    stem_notes.insert(stem_notes.end(), placed.begin(), placed.end());
+    app.roll_selected.assign(stem_notes.size(), 0);
+    for (int index = first; index < static_cast<int>(stem_notes.size()); ++index) {
+        app.roll_selected[static_cast<std::size_t>(index)] = 1;
+    }
+    finish_note_gesture(app, stem);
+    app.roll_paste = false;
+    return true;
+}
+
+bool midi_handle_paste_keys(App& app) {
+    if (!app.roll_paste) {
+        return false;
+    }
+    if (ImGui::GetIO().WantTextInput || ImGui::IsAnyItemActive()) {
+        return false;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        midi_cancel_paste(app);
+        return true;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+        midi_commit_paste_preview(app);
+        return true;
+    }
+    return false;
 }
 
 void midi_duplicate_selection(App& app) {
@@ -1612,6 +2754,9 @@ void midi_delete_selection(App& app) {
     if (!any) {
         return;
     }
+    if (app.tab_fingering_mode) {
+        tab_exit_fingering_mode(app);
+    }
     begin_note_gesture(app, stem);
     std::vector<MidiNote> kept;
     kept.reserve(stem_notes.size());
@@ -1622,6 +2767,9 @@ void midi_delete_selection(App& app) {
     }
     stem_notes = std::move(kept);
     app.roll_selected.assign(stem_notes.size(), 0);
+    if (!tab_score_empty(app.tab_scores[static_cast<std::size_t>(stem)])) {
+        tab_score_sync_from_midi(app, stem);
+    }
     finish_note_gesture(app, stem);
 }
 

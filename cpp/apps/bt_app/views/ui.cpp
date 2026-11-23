@@ -13,6 +13,7 @@
 #include "monitor.hpp"
 #include "notes.hpp"
 #include "separate.hpp"
+#include "tab.hpp"
 
 #include "bt/project.hpp"
 
@@ -44,9 +45,14 @@ IMGUI_API void EndDisabledOverrideReenable();
 #include <shobjidl.h>
 
 namespace btapp {
+
+float ui_scale() {
+    const float scale = ImGui::GetIO().FontGlobalScale;
+    return scale > 0.f ? scale : 1.f;
+}
+
 namespace {
 
-constexpr int kMixDrag = 6;
 constexpr int kMeterSegments = 24;
 constexpr float kProjectsDefault = 232.f;
 constexpr float kProjectsMin = 160.f;
@@ -72,11 +78,6 @@ constexpr ImU32 kStemInk[bt::kStemCount] = {
 constexpr ImU32 kHi = IM_COL32(242, 242, 242, 255);
 constexpr ImU32 kHiInk = IM_COL32(26, 26, 26, 255);
 constexpr ImU32 kWaveColor = IM_COL32(106, 173, 212, 255);
-
-float ui_scale() {
-    const float scale = ImGui::GetIO().FontGlobalScale;
-    return scale > 0.f ? scale : 1.f;
-}
 
 float snap_value(float value, float min_value, float max_value, float step) {
     const float steps = std::round((value - min_value) / step);
@@ -312,6 +313,16 @@ bool stem_audible(const App& app, int stem) {
 }
 
 void update_meters(App& app, const bt::SongSnapshot& song, const bt::Player::Snapshot& transport) {
+    if (!transport.playing) {
+        for (int stem = 0; stem < bt::kStemCount; ++stem) {
+            const auto index = static_cast<std::size_t>(stem);
+            app.meter_l[index] *= 0.85f;
+            app.meter_r[index] *= 0.85f;
+        }
+        app.master_meter_l *= 0.85f;
+        app.master_meter_r *= 0.85f;
+        return;
+    }
     const float master = db_to_gain(transport.master_db);
     const auto center = song.stems == nullptr
                             ? 0
@@ -319,7 +330,7 @@ void update_meters(App& app, const bt::SongSnapshot& song, const bt::Player::Sna
     for (int stem = 0; stem < bt::kStemCount; ++stem) {
         float left = 0.f;
         float right = 0.f;
-        if (transport.playing && song.stems && stem_audible(app, stem)) {
+        if (song.stems && stem_audible(app, stem)) {
             const auto& audio = song.stems->audio[static_cast<std::size_t>(stem)];
             float pan_l = 1.f;
             float pan_r = 1.f;
@@ -338,7 +349,7 @@ void update_meters(App& app, const bt::SongSnapshot& song, const bt::Player::Sna
     }
     float mix_left = 0.f;
     float mix_right = 0.f;
-    if (transport.playing && song.stems != nullptr && song.stems->frames > 0) {
+    if (song.stems != nullptr && song.stems->frames > 0) {
         const auto frames = song.stems->frames;
         const std::int64_t begin = std::max<std::int64_t>(0, center - 256);
         const std::int64_t end = std::min(frames, center + 256);
@@ -372,14 +383,14 @@ void update_meters(App& app, const bt::SongSnapshot& song, const bt::Player::Sna
 }
 
 void draw_icon(ImDrawList* draw, Icon icon, ImVec2 min, ImVec2 max, ImU32 color) {
-    // One square from the shorter inset edge. Atlas and vector fallback share that square.
+    // One square from the shorter inset edge. Font glyphs first; vector only if font missing.
     constexpr float kFill = 5.f / 6.f;
     constexpr float kVector = 0.42f;
     const float cx = (min.x + max.x) * 0.5f;
     const float cy = (min.y + max.y) * 0.5f;
     const float side = std::min(max.x - min.x, max.y - min.y) * kFill;
     const float half = side * 0.5f;
-    if (draw_icon_atlas(draw, icon, ImVec2(cx - half, cy - half), ImVec2(cx + half, cy + half), color)) {
+    if (draw_icon_font(draw, icon, ImVec2(cx - half, cy - half), ImVec2(cx + half, cy + half), color)) {
         return;
     }
     const ImVec2 center(cx, cy);
@@ -638,6 +649,17 @@ void draw_icon(ImDrawList* draw, Icon icon, ImVec2 min, ImVec2 max, ImU32 color)
     case Icon::Redo:
         history_arrow(1.f);
         break;
+    case Icon::TabUp: {
+        const float thick = std::max(1.8f, s * 0.22f);
+        draw->AddRectFilled(
+            ImVec2(center.x - s * 0.85f, center.y - s * 0.95f), ImVec2(center.x + s * 0.85f, center.y - s * 0.68f), color,
+            s * 0.12f);
+        draw->AddLine(ImVec2(center.x, center.y + s * 0.85f), ImVec2(center.x, center.y - s * 0.35f), color, thick);
+        draw->AddTriangleFilled(
+            ImVec2(center.x, center.y - s * 0.55f), ImVec2(center.x - s * 0.55f, center.y - s * 0.05f),
+            ImVec2(center.x + s * 0.55f, center.y - s * 0.05f), color);
+        break;
+    }
     case Icon::Count: {
         const float thick = std::max(1.6f, s * 0.16f);
         draw->AddCircle(center, s * 0.82f, color, 20, thick);
@@ -818,7 +840,7 @@ bool knob(
 }
 
 void draw_wave(
-    App& app, const char* id, int drag_id, const std::vector<Peak>& peaks, float peak_scale, ImU32 color, ImVec2 size,
+    App& app, const char* id, DragKind drag_id, const std::vector<Peak>& peaks, float peak_scale, ImU32 color, ImVec2 size,
     const bt::Player::Snapshot& transport, double length, bool ready, bool scrub, bool tempo) {
     ImGui::PushID(id);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -862,11 +884,11 @@ void draw_wave(
     };
     if (!disabled && scrub && ready && length > 0 && hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         app.wave_drag = drag_id;
-        app.loop_drag = -1;
+        app.loop_drag = DragKind::None;
     }
     if (!disabled && app.wave_drag == drag_id) {
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            app.wave_drag = -1;
+            app.wave_drag = DragKind::None;
         } else {
             app.player->seek(static_cast<double>(fraction_at(ImGui::GetIO().MousePos.x)) * length);
         }
@@ -877,12 +899,12 @@ void draw_wave(
                 app, transport, seconds, length, ImGui::GetIO().MousePos.x, x_of(std::max(0.0, transport.loop_a)),
                 x_of(std::max(0.0, transport.loop_b)), 36.f * ui_scale())) {
             app.loop_drag = drag_id;
-            app.wave_drag = -1;
+            app.wave_drag = DragKind::None;
         }
     }
     if (!disabled && app.loop_drag == drag_id) {
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-            app.loop_drag = -1;
+            app.loop_drag = DragKind::None;
         } else if (length > 0) {
             edit_loop_drag(app, static_cast<double>(fraction_at(ImGui::GetIO().MousePos.x)) * length, length);
         }
@@ -1072,6 +1094,9 @@ void draw_verify_submix(App& app, int stem, float width, float height) {
 }
 
 void select_strip(App& app, int stem) {
+    if (app.selected != stem) {
+        tab_exit_fingering_mode(app);
+    }
     app.selected = stem;
 }
 
@@ -1121,7 +1146,7 @@ void draw_strip(
 
     ImGui::SetCursorScreenPos(ImVec2(wave_x, wave_y));
     draw_wave(
-        app, "stem", stem, app.stem_peaks[static_cast<std::size_t>(stem)], song_wave_scale(app), kStemColor[stem],
+        app, "stem", wave_stem_drag(stem), app.stem_peaks[static_cast<std::size_t>(stem)], song_wave_scale(app), kStemColor[stem],
         ImVec2(wave_w, wave_h), transport, length, ready, true, false);
     const bool wave_clicked = ImGui::IsItemClicked();
     if (label_clicked || wave_clicked || row_clicked) {
@@ -1492,9 +1517,26 @@ void flow_toggle(FoldFlow& flow, App& app, const char* id, const char* label, bo
     });
 }
 
-enum class MidiMenu { Range, Hand };
+enum class MidiMenu { Range, Hand, Tab };
+
+void caption_ms_int(float value, char* text, std::size_t size) {
+    std::snprintf(text, size, "%d ms", static_cast<int>(std::lround(value)));
+}
+
+void caption_frets(float value, char* text, std::size_t size) {
+    std::snprintf(text, size, "%d", static_cast<int>(std::lround(value)));
+}
 
 void draw_fold_body(App& app, MidiMenu menu) {
+    if (menu == MidiMenu::Tab) {
+        app.tab_hand_span = std::clamp(app.tab_hand_span, 1, 12);
+        app.tab_onset_ms = std::clamp(app.tab_onset_ms, 0, 200);
+        FoldFlow tab = FoldFlow::begin();
+        flow_int_knob(tab, app, "tab-span", t("tab.hand_span"), &app.tab_hand_span, 1, 12, 4, caption_frets);
+        flow_int_knob(tab, app, "tab-onset", t("tab.onset_ms"), &app.tab_onset_ms, 0, 200, 2, caption_ms_int);
+        tab.end();
+        return;
+    }
     if (menu == MidiMenu::Range) {
         FoldFlow range = FoldFlow::begin();
         if (app.midi_view == MidiView::Guitar || app.midi_view == MidiView::Bass) {
@@ -1550,6 +1592,7 @@ void draw_midi_menu(App& app, bool fret) {
         bool show;
     };
     const Section sections[] = {
+        {t("tab.options"), MidiMenu::Tab, true},
         {t("range"), MidiMenu::Range, true},
         {t("hand"), MidiMenu::Hand, fret},
     };
@@ -1567,39 +1610,22 @@ void draw_midi_menu(App& app, bool fret) {
 void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::Snapshot& transport, double length, bool ready, float stage_h) {
     const float scale = ui_scale();
     const int stem = std::clamp(app.selected, 0, bt::kStemCount - 1);
-    const char* views[] = {t("guitar_view"), t("bass_view"), t("fall")};
-    const MidiView modes[] = {MidiView::Guitar, MidiView::Bass, MidiView::Fall};
-    const char* view_ids[] = {"view-guitar", "view-bass", "view-fall"};
+    const char* views[] = {t("stage.tab"), t("guitar_view"), t("fall")};
+    const MidiView modes[] = {MidiView::Tab, MidiView::Guitar, MidiView::Fall};
+    const char* view_ids[] = {"view-tab", "view-guitar", "view-fall"};
+    if (app.midi_view == MidiView::Bass) {
+        app.midi_view = MidiView::Guitar;
+    }
     const float row_y = 6.f * scale;
     const float view_h = PlayerButton::height();
     const float view_pad = 10.f * scale;
     const float menu_w = PlayerButton::width();
     const float menu_gap = 8.f * scale;
-    const char* stages[] = {t("stage.view"), t("stage.midi"), t("stage.tab")};
-    const NoteStage stage_values[] = {NoteStage::View, NoteStage::Midi, NoteStage::Tab};
-    const char* stage_ids[] = {"stage-view", "stage-midi", "stage-tab"};
-    const float stage_gap = 4.f * scale;
-    float stage_w[3];
-    float stages_span = 8.f * scale;
-    for (int index = 0; index < 3; ++index) {
-        stage_w[index] = text_button_width(stages[index], PlayerButton::width(), view_pad);
-        stages_span += stage_w[index];
-        if (index > 0) {
-            stages_span += stage_gap;
-        }
-    }
     ImVec2 menu_min(0.f, 0.f);
     ImVec2 menu_max(0.f, 0.f);
-    SideRow stage_row(SideRow::Dock::Right);
-    stage_row.margin(8.f * scale);
-    for (int index = 0; index < 3; ++index) {
-        stage_row.item(stage_w[index], view_h, index == 0 ? -1.f : stage_gap, [&, index] {
-            if (text_button(stage_ids[index], stages[index], app.note_stage == stage_values[index], true, stage_w[index], view_h, 8.f * scale)) {
-                app.note_stage = stage_values[index];
-            }
-        });
-    }
-    const float row_h = stage_row.commit(row_y);
+    const float row_h = view_h;
+    // Dual-view editor is the only note stage now (legacy Tab stage removed).
+    app.note_stage = NoteStage::Midi;
     const char* opened = project_name(app);
     const bool renaming = app.project_index >= 0 && app.rename_index == app.project_index;
     const bool busy = interface_locked(app);
@@ -1613,10 +1639,10 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
         const float field_h = view_h;
         const float field_y = row_y + (row_h - field_h) * 0.5f;
         const float actions_w = icon_w * 4.f + icon_gap * 3.f;
-        const float name_limit = ImGui::GetWindowWidth() - title_x - stages_span - actions_w - field_gap * 2.f - 8.f * scale;
+        const float name_limit = ImGui::GetWindowWidth() - title_x - actions_w - field_gap * 2.f - 16.f * scale;
         const float name_w = std::clamp(560.f * scale, 120.f * scale, std::max(120.f * scale, name_limit));
         const float bar_x = title_x + name_w + field_gap;
-        const float bar_right = ImGui::GetWindowWidth() - stages_span - 8.f * scale;
+        const float bar_right = ImGui::GetWindowWidth() - 8.f * scale;
         ImDrawList* header = ImGui::GetWindowDrawList();
         ImGui::SetCursorPos(ImVec2(title_x, field_y));
         const ImVec2 field_min = ImGui::GetCursorScreenPos();
@@ -1701,10 +1727,6 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
             delete_project_at(app, song, app.project_index);
         }
     }
-    const bool view_stage = app.note_stage == NoteStage::View;
-    if (!view_stage) {
-        app.midi_menu = false;
-    }
     float stack_y = row_y + row_h + 6.f * scale;
     auto status_line = [&](const char* text) {
         ImGui::SetCursorPos(ImVec2(10.f * scale, stack_y));
@@ -1724,7 +1746,6 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
     }
 
     const bool fret = app.midi_view == MidiView::Guitar || app.midi_view == MidiView::Bass;
-    const bool midi_stage = app.note_stage == NoteStage::Midi;
     const float tool_pad_y = 4.f * scale;
     const float tool_gap = 6.f * scale;
     const float tool_h = view_h + tool_pad_y * 2.f;
@@ -1755,37 +1776,54 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
         ImVec2(track_min.x + track_pad, track_min.y + (view_h - track_text.y) * 0.5f),
         kStemInk[stem], track_name);
     const float button_x = bar_x + tool_inset + track_w + track_gap;
-    if (view_stage) {
-        ImGui::SetCursorPos(ImVec2(button_x, button_y));
-        SideRow tools_row(SideRow::Dock::Left);
-        tools_row.item(menu_w, view_h, -1.f, [&, menu_w] {
-            menu_min = ImGui::GetCursorScreenPos();
-            menu_max = ImVec2(menu_min.x + menu_w, menu_min.y + view_h);
-            if (PlayerButton("midi-menu", Icon::Gear).engaged(app.midi_menu).tip(t("display")).draw()) {
-                app.midi_menu = !app.midi_menu;
+    const bool has_notes = !app.notes[static_cast<std::size_t>(stem)].empty();
+    bool any_selected = false;
+    if (app.roll_selected.size() == app.notes[static_cast<std::size_t>(stem)].size()) {
+        for (char bit : app.roll_selected) {
+            if (bit) {
+                any_selected = true;
+                break;
+            }
+        }
+    }
+    const bool quantize_enabled = ready && has_notes && any_selected;
+    const bool rerun_enabled = ready && app.note_status[static_cast<std::size_t>(stem)] != NoteStatus::Running;
+    const bool guitar = stem == kGuitarStem;
+    ImGui::SetCursorPos(ImVec2(button_x, button_y));
+    SideRow tools_row(SideRow::Dock::Left);
+    tools_row.item(menu_w, view_h, -1.f, [&, menu_w] {
+        menu_min = ImGui::GetCursorScreenPos();
+        menu_max = ImVec2(menu_min.x + menu_w, menu_min.y + view_h);
+        if (PlayerButton("midi-menu", Icon::Gear).engaged(app.midi_menu).tip(t("display")).draw()) {
+            app.midi_menu = !app.midi_menu;
+        }
+    });
+    for (int index = 0; index < 3; ++index) {
+        const float view_w = text_button_width(views[index], PlayerButton::width(), view_pad);
+        tools_row.item(view_w, view_h, index == 0 ? menu_gap : button_gap, [&, index, view_w] {
+            if (text_button(view_ids[index], views[index], app.midi_view == modes[index], true, view_w, view_h, 8.f * scale)) {
+                if (modes[index] != MidiView::Tab) {
+                    tab_exit_fingering_mode(app);
+                }
+                app.midi_view = modes[index];
             }
         });
-        for (int index = 0; index < 3; ++index) {
-            const float view_w = text_button_width(views[index], PlayerButton::width(), view_pad);
-            tools_row.item(view_w, view_h, index == 0 ? menu_gap : 4.f * scale, [&, index, view_w] {
-                if (text_button(view_ids[index], views[index], app.midi_view == modes[index], true, view_w, view_h, 8.f * scale)) {
-                    app.midi_view = modes[index];
-                }
-            });
-        }
-        tools_row.commit(button_y);
-    } else if (midi_stage) {
-        const bool quantize_enabled = ready && !app.notes[static_cast<std::size_t>(stem)].empty();
-        const bool rerun_enabled = ready && app.note_status[static_cast<std::size_t>(stem)] != NoteStatus::Running;
-        ImGui::SetCursorPos(ImVec2(button_x, button_y));
+    }
+    tools_row.item(menu_w, view_h, track_gap, [&] {
         if (PlayerButton("midi-quantize", Icon::Positions).enabled(quantize_enabled).tip(t("quantize")).draw()) {
             quantize_stem_notes(app, stem, length);
         }
-        ImGui::SetCursorPos(ImVec2(button_x + menu_w + button_gap, button_y));
+    });
+    tools_row.item(menu_w, view_h, button_gap, [&] {
         if (PlayerButton("midi-rerun", Icon::Rerun).enabled(rerun_enabled).tip(t("rerun_pitch")).draw()) {
             rerun_notes(app, stem);
         }
+    });
+    if (guitar) {
+        // Rhythm-tree duration / rest symbols are deferred — keep internal score for snap only.
+        tab_score_ensure_layout(app, stem);
     }
+    tools_row.commit(button_y);
     ImGui::SetCursorPos(ImVec2(bar_x, canvas_top + tool_span));
     {
         const ImVec2 canvas_min = ImGui::GetCursorScreenPos();
@@ -1798,7 +1836,7 @@ void draw_midi_stage(App& app, const bt::SongSnapshot& song, const bt::Player::S
     ImVec2 body_max(0.f, 0.f);
     if (app.midi_menu) {
         const float pad = 10.f * scale;
-        const float panel_max = fret ? 520.f * scale : 280.f * scale;
+        const float panel_max = fret ? 560.f * scale : 360.f * scale;
         const float panel_limit = std::max(menu_w, ImGui::GetWindowWidth() - pad * 2.f);
         const float panel_w = std::min(std::max(menu_w, panel_max), panel_limit);
         const float panel_lo = pad;
@@ -2727,6 +2765,41 @@ std::optional<std::filesystem::path> pick_audio(HWND__* hwnd) {
     return result;
 }
 
+std::optional<std::filesystem::path> pick_tab_export(HWND__* hwnd) {
+    IFileSaveDialog* dialog = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+        return std::nullopt;
+    }
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT);
+    const std::wstring filter_tab = tw("dialog.tab_filter");
+    const std::wstring filter_all = tw("dialog.all_files");
+    const std::wstring title = tw("dialog.export_tab");
+    const COMDLG_FILTERSPEC filters[] = {
+        {filter_tab.c_str(), L"*.txt"},
+        {filter_all.c_str(), L"*.*"},
+    };
+    dialog->SetFileTypes(2, filters);
+    dialog->SetDefaultExtension(L"txt");
+    dialog->SetFileName(L"tab.txt");
+    dialog->SetTitle(title.c_str());
+    std::optional<std::filesystem::path> result;
+    if (SUCCEEDED(dialog->Show(reinterpret_cast<HWND>(hwnd)))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item))) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                result = std::filesystem::path(path);
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+    }
+    dialog->Release();
+    return result;
+}
+
 void dismiss_popups_on_click_away() {
     ImGuiContext& context = *GImGui;
     if (context.OpenPopupStack.Size <= 0) {
@@ -2768,7 +2841,10 @@ void draw(App& app) {
         settings_seeded = true;
     }
     seed_shell(app);
-    const auto song = app.session->snapshot();
+    auto song = app.session->snapshot();
+    if (song == nullptr) {
+        return;
+    }
     const auto transport = app.player->snapshot();
     sync_beats(app, song);
     push_metronome(app);
@@ -2784,12 +2860,16 @@ void draw(App& app) {
     }
     app.metro_seen = transport.position;
     sync_notes(app, *song);
+    sync_stem_residency(app, *song);
+    song = app.session->snapshot();
+    if (song == nullptr) {
+        return;
+    }
     const bool ready = song->phase == bt::SongPhase::Ready && song->stems != nullptr && song->job != app.closed_job;
     const bool locked = interface_locked(app);
     const bool hold = !ready || locked;
     if (locked) {
-        app.wave_drag = -1;
-        app.loop_drag = -1;
+        cancel_pointer_gestures(app);
     }
     if (ready && song->stems != app.loaded) {
         app.player->set_song(song->stems);
@@ -2798,9 +2878,11 @@ void draw(App& app) {
         app.player->clear_song();
         app.loaded = nullptr;
     }
-    if (song->mix != app.peaks_source || song->stems != app.peak_stems) {
+    // Residency thins stems in-place under the same job — keep the first full peak map.
+    if (song->mix != app.peaks_source || song->job != app.peaks_job) {
         app.peaks_source = song->mix;
-        app.peak_stems = song->stems;
+        app.peaks_job = song->job;
+        app.peaks_stems_id = reinterpret_cast<std::uintptr_t>(song->stems.get());
         if (song->mix) {
             build_peaks(*song->mix, app.peaks, app.peak_scale);
         } else if (song->stems) {
@@ -2843,6 +2925,7 @@ void draw(App& app) {
     }
     if (app.player != nullptr) {
         static std::array<std::uint64_t, bt::kStemCount> cached_rev{};
+        static std::array<std::uint64_t, bt::kStemCount> published_fp{};
         static std::array<std::shared_ptr<const std::vector<bt::MidiSynthNote>>, bt::kStemCount> cached_notes{};
         for (int stem = 0; stem < bt::kStemCount; ++stem) {
             const auto index = static_cast<std::size_t>(stem);
@@ -2872,6 +2955,21 @@ void draw(App& app) {
                 cached_notes[index] = std::move(notes);
                 cached_rev[index] = revision;
             }
+            // Skip Player mutex work when verify UI + notes fingerprint is unchanged.
+            const std::uint64_t fingerprint =
+                revision ^ (static_cast<std::uint64_t>(lo) << 48) ^ (static_cast<std::uint64_t>(hi) << 40) ^
+                (static_cast<std::uint64_t>(verify.original.mute) << 1) ^
+                (static_cast<std::uint64_t>(verify.original.solo) << 2) ^
+                (static_cast<std::uint64_t>(verify.midi.mute) << 3) ^
+                (static_cast<std::uint64_t>(verify.midi.solo) << 4) ^
+                (static_cast<std::uint64_t>(static_cast<int>(verify.original.db * 100.f)) << 8) ^
+                (static_cast<std::uint64_t>(static_cast<int>(verify.midi.db * 100.f)) << 16) ^
+                (static_cast<std::uint64_t>(static_cast<int>(verify.original.pan * 100.f)) << 24) ^
+                (static_cast<std::uint64_t>(static_cast<int>(verify.midi.pan * 100.f)) << 32);
+            if (published_fp[index] == fingerprint && cached_notes[index]) {
+                continue;
+            }
+            published_fp[index] = fingerprint;
             app.player->set_verify_mix(stem, original, midi, lo, hi, cached_notes[index], revision);
         }
     }
@@ -3350,7 +3448,7 @@ void draw(App& app) {
     const float meter_gap = 8.f * scale;
     const float meters_w = LevelMeter::width();
     const float wave_w = std::max(1.f, ImGui::GetContentRegionAvail().x - 10.f * scale - meters_w - meter_gap);
-    draw_wave(app, "mix", kMixDrag, app.peaks, song_wave_scale(app), kWaveColor, ImVec2(wave_w, wave_h), transport, length, ready, true, true);
+    draw_wave(app, "mix", DragKind::WaveMix, app.peaks, song_wave_scale(app), kWaveColor, ImVec2(wave_w, wave_h), transport, length, ready, true, true);
     LevelMeter::draw(wave_cursor.x + wave_w + meter_gap, wave_cursor.y, wave_h, app.master_meter_l, app.master_meter_r);
     if (hold) {
         ImGui::EndDisabled();
@@ -3385,7 +3483,7 @@ void draw(App& app) {
     ImGui::PopStyleColor(2);
     draw_monitor(app);
     dismiss_popups_on_click_away();
-    if (app.loop_drag < 0 && !ImGui::IsAnyItemActive()) {
+    if (app.loop_drag == DragKind::None && !ImGui::IsAnyItemActive()) {
         record_project_playback(app);
         flush_project_playback(app);
     }

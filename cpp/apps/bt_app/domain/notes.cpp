@@ -3,6 +3,8 @@
 #include "monitor.hpp"
 #include "i18n.hpp"
 #include "app_state.hpp"
+#include "playback.hpp"
+#include "tab.hpp"
 
 #include "bt/basic_pitch.hpp"
 #include "bt/contract.hpp"
@@ -15,6 +17,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -28,13 +31,20 @@ void queue_notes(App& app, const bt::SongSnapshot& song, int stem, bool refresh)
         app.note_service == nullptr) {
         return;
     }
+    auto live = ensure_stem_resident(app, stem);
+    if (live == nullptr || live->stems == nullptr) {
+        live = app.session != nullptr ? app.session->snapshot() : nullptr;
+    }
+    if (live == nullptr || live->stems == nullptr) {
+        return;
+    }
     const auto index = static_cast<std::size_t>(stem);
     app.note_status[index] = NoteStatus::Running;
     app.note_detail[index].clear();
-    const auto cache_file = song.cache_directory / (std::string(bt::kStemNames[index]) + ".notes");
+    const auto cache_file = live->cache_directory / (std::string(bt::kStemNames[index]) + ".notes");
     // Per-stem policy: fixed decode defaults (UI no longer exposes BP knobs).
     app.note_ticket[index] = app.note_service->request(
-        song.job, stem, cache_file, song.stems, bt::pitch_parameters_for_stem(stem), refresh);
+        live->job, stem, cache_file, live->stems, bt::pitch_parameters_for_stem(stem), refresh);
     const char* tail = refresh ? t("log.rerun_tail") : "";
     log_stem(LogLevel::Info, stem, "log.transcribe_start", tail);
 }
@@ -318,6 +328,7 @@ void NoteService::worker_main(int slot) {
         }
         // Drums: never run BP — always empty MIDI (rewrite cache so old drum pitches disappear).
         if (bt::stem_skips_pitch(request.stem)) {
+            request.stems.reset();
             Result result{request.job, ticket, request.stem, false, {}, {}, request.parameters};
             if (auto stored = bt::save_notes(request.cache_file, result.notes); !stored) {
                 finish(Result{
@@ -331,6 +342,7 @@ void NoteService::worker_main(int slot) {
         if (!request.refresh && std::filesystem::exists(request.cache_file)) {
             auto loaded = bt::load_notes(request.cache_file);
             if (loaded) {
+                request.stems.reset();
                 set_progress(1.f);
                 finish(Result{request.job, ticket, request.stem, false, {}, std::move(*loaded), request.parameters});
                 continue;
@@ -338,6 +350,8 @@ void NoteService::worker_main(int slot) {
         }
         auto audio = bt::stem_to_basic_pitch_audio(
             request.stems->audio[static_cast<std::size_t>(request.stem)], request.stems->frames);
+        // Drop the full six-stem pin; transcription only needs the mono buffer.
+        request.stems.reset();
         if (!audio) {
             finish(Result{request.job, ticket, request.stem, false, audio.error(), {}, {}});
             continue;
@@ -412,6 +426,9 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
         for (auto& notes : app.notes) {
             notes.clear();
         }
+        for (int stem = 0; stem < bt::kStemCount; ++stem) {
+            tab_score_clear(app, stem);
+        }
         app.note_status.fill(NoteStatus::Idle);
         app.note_refresh.fill(false);
         app.note_edits.fill(0);
@@ -463,7 +480,12 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
             if (!song.cache_directory.empty()) {
                 const auto edit_path =
                     song.cache_directory / (std::string(bt::kStemNames[index]) + ".notes.edit");
-                if (auto edited = bt::load_notes(edit_path)) {
+                if (rerun) {
+                    // Pitch rerun must show fresh BP output; discard prior manual edits.
+                    std::error_code ec;
+                    std::filesystem::remove(edit_path, ec);
+                    app.note_edits[index] = 0;
+                } else if (auto edited = bt::load_notes(edit_path)) {
                     app.notes[index].clear();
                     app.notes[index].reserve(edited->size());
                     for (const bt::Note& note : *edited) {
@@ -473,6 +495,13 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
             }
             if (app.roll_stem == result.stem) {
                 app.roll_note = -1;
+                app.roll_selected.clear();
+                app.roll_seen_notes = false;
+                app.roll_fit_length = -1;
+                if (app.tab_fingering_mode) {
+                    tab_exit_fingering_mode(app);
+                }
+                app.pane_focus = PaneFocus::Roll;
             }
             if (app.note_gesture && app.note_gesture_stem == result.stem) {
                 app.note_gesture = false;
@@ -485,6 +514,13 @@ void sync_notes(App& app, const bt::SongSnapshot& song) {
                 step.notes_before = std::move(rerun_before);
                 step.notes_after = app.notes[index];
                 push_project_step(app, std::move(step));
+            }
+            // Guitar TAB is a live view of MIDI — assign frets immediately after transcription.
+            if (result.stem == kGuitarStem && !app.notes[index].empty()) {
+                tab_score_clear(app, result.stem);
+                tab_resolve_fingerings(app, result.stem, false);
+                tab_score_build(app, result.stem, false);
+                commit_note_edit(app, result.stem);
             }
             app.note_status[index] = NoteStatus::Ready;
             app.note_detail[index].clear();
@@ -573,6 +609,7 @@ void commit_note_edit(App& app, int stem) {
     const auto path = song->cache_directory / (std::string(bt::kStemNames[index]) + ".notes.edit");
     const auto stored = bt::save_notes(path, app.notes[index]);
     if (!stored) {
+        log_stem(LogLevel::Error, stem, "log.notes_save_failed", " · " + stored.error());
         return;
     }
 }
@@ -586,7 +623,8 @@ bool same_notes(const std::vector<MidiNote>& left, const std::vector<MidiNote>& 
     for (std::size_t index = 0; index < left.size(); ++index) {
         const MidiNote& a = left[index];
         const MidiNote& b = right[index];
-        if (a.pitch != b.pitch || a.velocity != b.velocity) {
+        if (a.pitch != b.pitch || a.velocity != b.velocity || a.string != b.string || a.fret != b.fret ||
+            a.on_tab != b.on_tab) {
             return false;
         }
         if (std::fabs(a.start - b.start) > 1e-4 || std::fabs(a.end - b.end) > 1e-4) {
@@ -615,6 +653,7 @@ void finish_note_gesture(App& app, int stem) {
     }
     app.note_gesture = false;
     const auto index = static_cast<std::size_t>(stem);
+    revalidate_stem_fingerings(app.notes[index]);
     if (same_notes(app.note_gesture_before, app.notes[index])) {
         app.note_gesture_before.clear();
         return;
@@ -629,23 +668,6 @@ void finish_note_gesture(App& app, int stem) {
     commit_note_edit(app, stem);
 }
 
-namespace {
-
-double nearest_time(double time, const std::vector<double>& grid) {
-    double best = grid.front();
-    double best_distance = std::abs(time - best);
-    for (double mark : grid) {
-        const double distance = std::abs(time - mark);
-        if (distance < best_distance) {
-            best = mark;
-            best_distance = distance;
-        }
-    }
-    return best;
-}
-
-}  // namespace
-
 void quantize_stem_notes(App& app, int stem, double length) {
     if (stem < 0 || stem >= bt::kStemCount) {
         return;
@@ -654,27 +676,27 @@ void quantize_stem_notes(App& app, int stem, double length) {
     if (notes.empty()) {
         return;
     }
-    double cover = std::max(0.0, length);
-    for (const bt::Note& note : notes) {
-        cover = std::max(cover, note.start);
+    if (app.roll_selected.size() != notes.size()) {
+        return;
     }
-    std::vector<double> grid;
-    auto collect = [&](double tick, GridMark) { grid.push_back(tick); };
-    if (app.beat_times != nullptr && !app.beat_times->empty()) {
-        each_grid_tick(*app.beat_times, app.grid_division, 0.0, cover + 8.0, collect);
-    } else {
-        each_bpm_tick(app.bpm, app.beat_offset, app.grid_division, 0.0, cover + 8.0, collect);
+    bool any_selected = false;
+    for (char bit : app.roll_selected) {
+        if (bit) {
+            any_selected = true;
+            break;
+        }
     }
-    if (grid.empty()) {
-        grid.push_back(0.0);
+    if (!any_selected) {
+        return;
     }
+    log_stem(LogLevel::Info, stem, "log.quantize_start");
     begin_note_gesture(app, stem);
-    for (bt::Note& note : notes) {
-        const double duration = std::max(0.01, note.end - note.start);
-        note.start = std::max(0.0, nearest_time(note.start, grid));
-        note.end = note.start + duration;
-    }
+    auto workspace = tab_workspace(app);
+    workspace.length = length;
+    bt::core::quantize_notes(workspace, stem, app.roll_selected);
+    tab_workspace_pull(app, workspace);
     finish_note_gesture(app, stem);
+    log_stem(LogLevel::Info, stem, "log.quantize_done");
 }
 
 void rerun_notes(App& app, int stem) {

@@ -5,11 +5,11 @@ endif()
 set(assets
   models/nmp.onnx
   fonts/sarasa-gothic-tc-nerd-merged.ttf
+  fonts/bt-icons.ttf
+  fonts/Bravura.ttf
   locales/zh-Hant.txt
   locales/zh-Hans.txt
-  locales/en.txt
-  assets/icons/atlas.png
-  assets/icons/atlas.json)
+  locales/en.txt)
 
 foreach(rel IN LISTS assets)
   set(src "${BT_SRC_DIR}/${rel}")

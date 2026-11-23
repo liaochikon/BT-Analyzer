@@ -45,6 +45,7 @@ ICONS = [
     "magnet",
     "undo",
     "redo",
+    "tab_up",
     "count",
 ]
 
@@ -522,6 +523,27 @@ def draw_undo(d: ImageDraw.ImageDraw) -> None:
     draw_redo(d)
 
 
+def draw_tab_up(d: ImageDraw.ImageDraw) -> None:
+    # Arrow up into a top bar — "publish onto TAB".
+    b = box()
+    cx, cy = mid(b)
+    s = min(wh(b)) * 0.5
+    sw = max(14, int(STROKE * 1.0))
+    bar_y0 = cy - s * 0.95
+    bar_y1 = cy - s * 0.72
+    d.rounded_rectangle((cx - s * 0.9, bar_y0, cx + s * 0.9, bar_y1), radius=6, fill=white())
+    tip = cy - s * 0.55
+    d.line([(cx, cy + s * 0.85), (cx, tip + s * 0.05)], fill=white(), width=sw)
+    d.polygon(
+        [
+            (cx, tip - s * 0.08),
+            (cx - s * 0.55, tip + s * 0.42),
+            (cx + s * 0.55, tip + s * 0.42),
+        ],
+        fill=white(),
+    )
+
+
 def draw_count(d: ImageDraw.ImageDraw) -> None:
     b = box()
     cx, cy = mid(b)
@@ -560,6 +582,7 @@ DRAWERS = {
     "magnet": draw_magnet,
     "undo": draw_undo,
     "redo": draw_redo,
+    "tab_up": draw_tab_up,
     "count": draw_count,
 }
 

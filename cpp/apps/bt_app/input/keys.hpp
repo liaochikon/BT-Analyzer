@@ -42,6 +42,10 @@ enum class Action : int {
     MidiPaste,
     MidiDuplicate,
     MidiDelete,
+    // TAB fingering (Midi dual-view)
+    TabFingering,
+    TabComboPrev,
+    TabComboNext,
     Count
 };
 
@@ -85,6 +89,13 @@ std::string sequence_text(const KeySequence& sequence);
 bool capture_chord(KeyChord& out);
 void draw_keymap_settings(App& app);
 void draw_shortcut_hints(App& app);
+
+// Single keyboard entry (called once per frame from ui::draw).
+// Pipeline:
+//   1) gates — keymap capture, IME, WantTextInput, settings, active widgets
+//   2) mode-local — paste Esc/Enter, TAB fingering Esc/Enter, TAB score caret keys
+//   3) keymap Actions — transport / mixer / MIDI edit bindings
+// UI widgets (settings capture, focused text fields) keep their own Esc locally.
 void handle_actions(App& app, bool ready);
 
 }  // namespace btapp

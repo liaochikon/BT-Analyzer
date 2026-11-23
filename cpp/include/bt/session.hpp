@@ -84,6 +84,10 @@ public:
     std::uint64_t set_mute(int stem, bool mute);
     std::uint64_t set_solo(int stem, bool solo);
 
+    // Ready songs only. `need[i]==true` keeps/loads stem i from cache; false unloads it from RAM.
+    // Returns the published revision (0 if ignored). Callers may wait_for_revision.
+    std::uint64_t sync_stem_residency(std::array<bool, kStemCount> need);
+
     std::shared_ptr<const SongSnapshot> snapshot() const;
     std::shared_ptr<const SongSnapshot> wait(std::uint64_t job) const;
     std::shared_ptr<const SongSnapshot> wait_for(std::uint64_t job, std::chrono::milliseconds timeout) const;
@@ -100,6 +104,7 @@ private:
     void run_open_cache(const Command& command);
     void run_close();
     void run_relocate(const Command& command);
+    void run_stem_residency(const Command& command);
     void apply_mixer(const Command& command);
     void drain_mixer();
     void note_cancel(const Command& command);
@@ -111,7 +116,9 @@ private:
         std::shared_ptr<const Stems> stems;
     };
     std::expected<std::shared_ptr<CacheHit>, std::string> load_cache(const std::filesystem::path& directory) const;
-    std::expected<void, std::string> store_cache(const std::filesystem::path& directory, const Stems& stems) const;
+    // Writes stems to cache. When `release` is true, each stem buffer is cleared after it is written.
+    std::expected<void, std::string> store_cache(
+        const std::filesystem::path& directory, Stems& stems, bool release = false) const;
 
     SessionOptions options_;
     struct State;

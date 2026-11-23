@@ -17,6 +17,11 @@ struct Note {
     double start = 0;
     double end = 0;
     int velocity = 100;
+    // Guitar TAB fingering. -1 means unset. string 0 = high e … 5 = low E.
+    int string = -1;
+    int fret = -1;
+    // Explicit membership on the TAB staff. BP/MIDI notes stay off until the user publishes them.
+    bool on_tab = false;
 };
 
 struct PitchParameters {

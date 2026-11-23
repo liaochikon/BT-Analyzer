@@ -6,6 +6,8 @@
 
 BT-Analyzer 是基於 Demucs 和 Basic Pitch 的轉譜工具，主要用來加速我的吉他抓歌流程，所以針對吉他指板的抓譜和彈奏位置顯示做了蠻多工作；此外，也在播放器裡加入一些方便練歌的功能。
 
+程式分層與無頭／agent 入口見 [ARCHITECTURE.md](ARCHITECTURE.md)。無頭管線：`bt-agent --cache <dir> --model models/bs_roformer_sw.onnx --pitch models/nmp.onnx <audio>`（`bt::core::Engine`）。
+
 ![簡介](docs/images/intro.png)
 
 目前版本已用 C++、ONNX Runtime 和 Dear ImGui 重構，在 Windows 11 測試可直接解壓縮即用。若使用上有問題或建議，歡迎留 Issue 或聯絡我。

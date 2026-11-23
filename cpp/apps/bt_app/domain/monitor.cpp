@@ -7,6 +7,7 @@
 #include "separate.hpp"
 
 #include "bt/contract.hpp"
+#include "bt/log.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -51,6 +52,12 @@ std::mutex gate;
 std::deque<Line> lines;
 std::filesystem::path log_path;
 bool file_capped = false;
+std::string file_pending;
+std::size_t file_pending_lines = 0;
+std::uint64_t file_bytes = 0;
+constexpr std::size_t kFileBatchLines = 32;
+constexpr std::size_t kFileBatchBytes = 8 * 1024;
+constexpr std::uint64_t kFileCapBytes = 4ull * 1024ull * 1024ull;
 CpuMeter cpu;
 int processors = 0;
 std::string computer;
@@ -102,14 +109,14 @@ void remember(LogLevel level, std::string text) {
     }
 }
 
-void append_file(const std::string& text) {
-    if (log_path.empty() || file_capped) {
+void flush_file_locked() {
+    if (log_path.empty() || file_capped || file_pending.empty()) {
         return;
     }
-    std::error_code error;
-    const auto size = std::filesystem::file_size(log_path, error);
-    if (!error && size > 4ull * 1024ull * 1024ull) {
+    if (file_bytes > kFileCapBytes) {
         file_capped = true;
+        file_pending.clear();
+        file_pending_lines = 0;
         remember(LogLevel::Warn, std::string(clock_text()) + "  log file is full");
         return;
     }
@@ -117,7 +124,26 @@ void append_file(const std::string& text) {
     if (!output) {
         return;
     }
-    output << text << '\n';
+    output << file_pending;
+    file_bytes += static_cast<std::uint64_t>(file_pending.size());
+    file_pending.clear();
+    file_pending_lines = 0;
+    if (file_bytes > kFileCapBytes) {
+        file_capped = true;
+        remember(LogLevel::Warn, std::string(clock_text()) + "  log file is full");
+    }
+}
+
+void queue_file(const std::string& text) {
+    if (log_path.empty() || file_capped) {
+        return;
+    }
+    file_pending.append(text);
+    file_pending.push_back('\n');
+    ++file_pending_lines;
+    if (file_pending_lines >= kFileBatchLines || file_pending.size() >= kFileBatchBytes) {
+        flush_file_locked();
+    }
 }
 
 void sample_cpu() {
@@ -441,14 +467,39 @@ void draw_log(int language) {
 void monitor_start(const std::filesystem::path& cache_directory) {
     std::error_code error;
     std::filesystem::create_directories(cache_directory, error);
+    {
+        std::lock_guard lock(gate);
+        log_path = cache_directory / "bt-app.log";
+        file_capped = false;
+        file_pending.clear();
+        file_pending_lines = 0;
+        file_bytes = 0;
+        const auto size = std::filesystem::file_size(log_path, error);
+        if (!error) {
+            file_bytes = static_cast<std::uint64_t>(size);
+        }
+    }
+    // Core / agent-safe calls land here via bt::log → monitor ring + bt-app.log.
+    bt::set_log_sink([](bt::LogLevel level, std::string_view text) {
+        LogLevel mapped = LogLevel::Info;
+        if (level == bt::LogLevel::Warn) {
+            mapped = LogLevel::Warn;
+        } else if (level == bt::LogLevel::Error) {
+            mapped = LogLevel::Error;
+        }
+        log_message(mapped, std::string(text));
+    });
+}
+
+void monitor_flush() {
     std::lock_guard lock(gate);
-    log_path = cache_directory / "bt-app.log";
+    flush_file_locked();
 }
 
 void log_message(LogLevel level, std::string text) {
     const std::string stamped = clock_text() + "  " + text;
     std::lock_guard lock(gate);
-    append_file(stamped);
+    queue_file(stamped);
     remember(level, stamped);
 }
 
@@ -504,6 +555,7 @@ void draw_monitor(App& app) {
         monitor_start(app.cache_directory);
         log_startup(app);
     }
+    monitor_flush();
     const auto song = app.session != nullptr ? app.session->snapshot() : nullptr;
     if (song != nullptr) {
         log_phase(app.language, *song);

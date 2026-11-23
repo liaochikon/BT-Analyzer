@@ -44,6 +44,15 @@ std::expected<Stems, std::string> separate_audio(
 std::expected<void, std::string> write_stems(
     const std::filesystem::path& directory, const Stems& stems);
 
+// Same as write_stems, then clears each stem buffer after it is written (peak-RAM friendly).
+std::expected<void, std::string> write_stems_release(
+    const std::filesystem::path& directory, Stems& stems);
+
+// Load one stereo stem wav from a project cache folder into `stems.audio[stem]`.
+// When `stems.frames == 0`, adopts the file length; otherwise requires a match.
+std::expected<void, std::string> read_cached_stem(
+    const std::filesystem::path& directory, Stems& stems, int stem);
+
 std::vector<float> triangular_weight(int segment_samples);
 
 // Writes a stereo channel-major segment. Returns the unpadded chunk length.

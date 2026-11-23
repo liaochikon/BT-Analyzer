@@ -105,6 +105,10 @@ struct ProjectPlayback {
     bool fret_allow_open = false;
     bool fret_show_alt = true;
     bool fret_harmonic = false;
+    int tab_hand_span = 4;
+    int tab_onset_ms = 2;
+    // "grid" (continuous time) or "score" (rhythm tree columns). Applies to MIDI + TAB together.
+    std::string rhythm_layout = "grid";
 };
 
 inline ProjectPlayback default_project_playback() { return {}; }
